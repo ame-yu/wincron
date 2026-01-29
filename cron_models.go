@@ -1,0 +1,34 @@
+package main
+
+type Job struct {
+	ID                      string   `json:"id" yaml:"id"`
+	Name                    string   `json:"name" yaml:"name"`
+	Cron                    string   `json:"cron" yaml:"cron"`
+	Command                 string   `json:"command" yaml:"command"`
+	Args                    []string `json:"args" yaml:"args"`
+	WorkDir                 string   `json:"workDir" yaml:"workDir"`
+	Enabled                 bool     `json:"enabled" yaml:"enabled"`
+	MaxConsecutiveFailures  int      `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
+	ConsecutiveFailures     int      `json:"consecutiveFailures" yaml:"consecutiveFailures"`
+}
+
+type PreviewRunRequest struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	WorkDir string   `json:"workDir"`
+	JobID   string   `json:"jobId"`
+	JobName string   `json:"jobName"`
+}
+
+type JobLogEntry struct {
+	ID         string `json:"id"`
+	JobID      string `json:"jobId"`
+	JobName    string `json:"jobName"`
+	CommandLine string `json:"commandLine"`
+	StartedAt  string `json:"startedAt"`
+	FinishedAt string `json:"finishedAt"`
+	ExitCode   int    `json:"exitCode"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	Error      string `json:"error"`
+}
