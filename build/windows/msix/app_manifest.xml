@@ -7,14 +7,14 @@
   
   <Identity 
     Name="com.wails.wincron"
-    Publisher="CN=My Company"
+    Publisher="CN=None"
     Version="0.1.0.0" 
     ProcessorArchitecture="x64" />
   
   <Properties>
-    <DisplayName>My Product</DisplayName>
-    <PublisherDisplayName>My Company</PublisherDisplayName>
-    <Description>WinCron</Description>
+    <DisplayName>WinCron</DisplayName>
+    <PublisherDisplayName>Kyle Zhou</PublisherDisplayName>
+    <Description>A cron job scheduler for Windows</Description>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
   
@@ -29,8 +29,8 @@
   <Applications>
     <Application Id="com.wails.wincron" Executable="wincron.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="My Product"
-        Description="WinCron"
+        DisplayName="WinCron"
+        Description="A cron job scheduler for Windows"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">

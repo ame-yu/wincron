@@ -200,7 +200,7 @@ func main() {
 		lightweightMode := settingsSvc.getLightweightMode()
 
 		trayMenu := application.NewMenu()
-		trayMenu.Add("Open Main Page").OnClick(func(_ *application.Context) {
+		trayMenu.Add("Open Home Page").OnClick(func(_ *application.Context) {
 			w := ensureMainWindow()
 			w.Show()
 			w.Focus()
@@ -217,9 +217,9 @@ func main() {
 			setTrayMenu()
 		})
 
-		toggleLabel := "Disable Globally"
+		toggleLabel := "Disable Wincron"
 		if !globalEnabled {
-			toggleLabel = "Enable Globally"
+			toggleLabel = "Enable WinCron"
 		}
 		trayMenu.Add(toggleLabel).OnClick(func(_ *application.Context) {
 			current, err := cronSvc.GetGlobalEnabled()
@@ -249,6 +249,7 @@ func main() {
 	setTrayMenu()
 	tray.OnClick(func() {})
 	tray.OnRightClick(func() {
+		setTrayMenu()
 		tray.OpenMenu()
 	})
 	tray.OnDoubleClick(func() {

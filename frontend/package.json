@@ -15,6 +15,7 @@
     "pinia": "^2.1.7",
     "tailwindcss": "^4.1.18",
     "vue": "^3.4.38",
+    "vue-i18n": "^11.2.8",
     "vue-router": "^4.3.0"
   },
   "devDependencies": {

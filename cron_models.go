@@ -10,6 +10,9 @@ type Job struct {
 	Enabled                 bool     `json:"enabled" yaml:"enabled"`
 	MaxConsecutiveFailures  int      `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
 	ConsecutiveFailures     int      `json:"consecutiveFailures" yaml:"consecutiveFailures"`
+	ExecutedCount           int      `json:"executedCount" yaml:"-"`
+	LastExecutedAt          string   `json:"lastExecutedAt" yaml:"-"`
+	NextRunAt               string   `json:"nextRunAt,omitempty" yaml:"-"`
 }
 
 type PreviewRunRequest struct {

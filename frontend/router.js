@@ -5,8 +5,8 @@ import SettingsPage from "./pages/SettingsPage.vue"
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: "/", name: "main", component: MainPage },
-    { path: "/settings", name: "settings", component: SettingsPage },
+    { path: "/", name: "Home", component: MainPage },
+    { path: "/settings", name: "Settings", component: SettingsPage },
   ],
 })
 

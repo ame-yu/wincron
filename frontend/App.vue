@@ -2,21 +2,44 @@
 import { computed, onMounted, onUnmounted, watch } from "vue"
 import { storeToRefs } from "pinia"
 import { useRoute, useRouter } from "vue-router"
+import { useI18n } from "vue-i18n"
 import { Events, Window } from "@wailsio/runtime"
 import { useCronStore } from "./stores/cron.js"
+import { setAppLocale } from "./i18n.js"
 
 const cron = useCronStore()
 const { toast, toastKind, globalEnabled } = storeToRefs(cron)
 
+const { t, locale } = useI18n()
+
+const appLocale = computed({
+  get: () => locale.value,
+  set: (value) => {
+    setAppLocale(value)
+  },
+})
+
 const router = useRouter()
 const route = useRoute()
-const isSettings = computed(() => route.name === "settings")
+const isSettings = computed(() => route.name === "Settings")
+const nav = computed(() => {
+  const _ = locale.value
+  return isSettings.value
+    ? { label: t("nav.back"), name: "Home" }
+    : { label: t("nav.settings"), name: "Settings" }
+})
 
 watch(
-  () => route.name,
-  (name) => {
-    const base = "WinCron"
-    const suffix = name ? String(name) : ""
+  [() => route.name, () => locale.value, () => globalEnabled.value],
+  ([name, _locale, enabled]) => {
+    const base = enabled ? "WinCron" : t("global.disabled_title")
+    const routeName = typeof name === "string" ? name : ""
+    const suffix =
+      routeName === "Settings"
+        ? t("route.settings")
+        : routeName === "Home"
+          ? t("route.home")
+          : routeName
     const title = suffix ? `${base} - ${suffix}` : base
     document.title = title
     Window.SetTitle(title).catch(() => {})
@@ -24,51 +47,40 @@ watch(
   { immediate: true },
 )
 
-function goSettings() {
-  router.push({ name: "settings" })
+function goNav() {
+  router.push({ name: nav.value.name })
 }
 
-function goBack() {
-  router.push({ name: "main" })
-}
-
-async function toggleGlobalEnabled() {
+async function toggleGlobalEnabled(value) {
+  const next = typeof value === "boolean" ? value : !globalEnabled.value
   try {
-    await cron.setGlobalEnabled(!globalEnabled.value)
+    await cron.setGlobalEnabled(next)
   } catch {
     // noop
   }
 }
 
-let offNavigate = null
-let offGlobalEnabledChanged = null
+const offHandlers = []
 
 onMounted(async () => {
   await cron.init()
 
-  offNavigate = Events.On("navigate", async (event) => {
-    const target = String(event?.data || "")
-    if (target === "settings") {
-      await router.push({ name: "settings" })
-      return
-    }
-    await router.push({ name: "main" })
-  })
+  offHandlers.push(
+    Events.On("navigate", async (event) => {
+      const target = String(event?.data || "")
+      await router.push({ name: target === "Settings" ? "Settings" : "Home" })
+    }),
+  )
 
-  offGlobalEnabledChanged = Events.On("globalEnabledChanged", (event) => {
-    globalEnabled.value = !!event?.data
-  })
+  offHandlers.push(
+    Events.On("globalEnabledChanged", (event) => {
+      globalEnabled.value = !!event?.data
+    }),
+  )
 })
 
 onUnmounted(() => {
-  if (offNavigate) {
-    offNavigate()
-    offNavigate = null
-  }
-  if (offGlobalEnabledChanged) {
-    offGlobalEnabledChanged()
-    offGlobalEnabledChanged = null
-  }
+  offHandlers.splice(0).forEach((off) => off?.())
   cron.dispose()
 })
 </script>
@@ -87,38 +99,55 @@ onUnmounted(() => {
       <div class="mx-auto flex max-w-[1240px] items-center justify-between gap-3 px-3 py-2 sm:px-5 sm:py-3">
         <div class="flex items-center gap-2.5">
           <div class="flex items-center gap-2">
-            <span class="text-xs text-slate-600">Global</span>
-            <button
-              type="button"
-              class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-4 focus:ring-blue-600/20"
-              :class="globalEnabled ? 'bg-green-600' : 'bg-slate-300'"
-              :title="globalEnabled ? 'Global enabled' : 'Global disabled'"
-              @click="toggleGlobalEnabled"
+            <span class="text-xs text-slate-600">{{ $t("global.label") }}</span>
+            <div
+              class="relative inline-flex h-8 w-[240px] items-stretch rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm"
+              :title="globalEnabled ? $t('global.enabled') : $t('global.disabled')"
             >
-              <span
-                class="inline-block h-5 w-5 transform rounded-full bg-white transition"
-                :class="globalEnabled ? 'translate-x-5' : 'translate-x-1'"
-              />
-            </button>
-          </div>
+              <div
+                class="pointer-events-none absolute inset-y-0 left-0 w-1/2 rounded-lg transition-transform"
+                :class="[
+                  globalEnabled ? 'translate-x-0 bg-green-600' : 'translate-x-full bg-slate-600',
+                ]"
+              ></div>
 
-          <button
-            v-if="!isSettings"
-            class="appearance-none rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
-            @click="goSettings"
-          >
-            Settings
-          </button>
-          <button
-            v-else
-            class="appearance-none rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
-            @click="goBack"
-          >
-            Back
-          </button>
+              <button
+                type="button"
+                class="relative z-10 flex flex-1 items-center justify-center rounded-lg px-2 text-[11px] font-medium leading-tight whitespace-nowrap transition-colors focus:outline-none focus:ring-4 focus:ring-blue-600/20"
+                :class="globalEnabled ? 'text-white' : 'text-slate-500'"
+                @click="toggleGlobalEnabled(true)"
+              >
+                {{ $t("global.enable_wincorn") }}
+              </button>
+              <button
+                type="button"
+                class="relative z-10 flex flex-1 items-center justify-center rounded-lg px-2 text-[11px] font-medium leading-tight whitespace-nowrap transition-colors focus:outline-none focus:ring-4 focus:ring-blue-600/20"
+                :class="globalEnabled ? 'text-slate-500' : 'text-white'"
+                @click="toggleGlobalEnabled(false)"
+              >
+                {{ $t("global.disable_wincorn") }}
+              </button>
+            </div>
+          </div>
         </div>
         <div class="flex items-center gap-2.5">
-          <div class="h-8 min-w-[120px]"></div>
+          <select
+            v-model="appLocale"
+            class="h-8 min-w-[120px] appearance-none rounded-xl border border-slate-200 bg-white px-2.5 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
+            :title="$t('app.language')"
+          >
+            <option value="en">🇺🇸 EN</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="ja">🇯🇵 日本語</option>
+          </select>
+
+          <button
+            class="appearance-none rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
+            :title="nav.label"
+            @click="goNav"
+          >
+            {{ nav.label }}
+          </button>
         </div>
       </div>
     </header>

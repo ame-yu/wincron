@@ -64,6 +64,9 @@ func (s *settingsStore) load() (AppSettings, error) {
 		settings.WindowWidth = 0
 		settings.WindowHeight = 0
 	}
+	if !settings.SilentStart {
+		settings.LightweightMode = false
+	}
 	return settings, nil
 }
 
@@ -181,6 +184,9 @@ func (s *SettingsService) SetSettings(settings AppSettings) error {
 		settings.WindowWidth = 0
 		settings.WindowHeight = 0
 	}
+	if !settings.SilentStart {
+		settings.LightweightMode = false
+	}
 
 	s.mu.RLock()
 	prev := s.settings
@@ -231,13 +237,18 @@ func (s *SettingsService) SetCloseBehavior(behavior string) error {
 func (s *SettingsService) SetSilentStart(enabled bool) error {
 	s.mu.Lock()
 	prev := s.settings.SilentStart
+	prevLightweight := s.settings.LightweightMode
 	s.settings.SilentStart = enabled
+	if !enabled {
+		s.settings.LightweightMode = false
+	}
 	settings := s.settings
 	s.mu.Unlock()
 
 	if err := s.store.save(settings); err != nil {
 		s.mu.Lock()
 		s.settings.SilentStart = prev
+		s.settings.LightweightMode = prevLightweight
 		s.mu.Unlock()
 		return err
 	}
@@ -272,6 +283,11 @@ func (s *SettingsService) SetAutoStart(enabled bool) error {
 func (s *SettingsService) SetLightweightMode(enabled bool) error {
 	s.mu.Lock()
 	prev := s.settings.LightweightMode
+	prevSilent := s.settings.SilentStart
+	if enabled && !s.settings.SilentStart {
+		s.mu.Unlock()
+		return errors.New("lightweightMode requires silentStart")
+	}
 	s.settings.LightweightMode = enabled
 	settings := s.settings
 	s.mu.Unlock()
@@ -279,6 +295,7 @@ func (s *SettingsService) SetLightweightMode(enabled bool) error {
 	if err := s.store.save(settings); err != nil {
 		s.mu.Lock()
 		s.settings.LightweightMode = prev
+		s.settings.SilentStart = prevSilent
 		s.mu.Unlock()
 		return err
 	}

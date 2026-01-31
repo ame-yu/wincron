@@ -1,8 +1,10 @@
 import { reactive, ref } from "vue"
 import { defineStore } from "pinia"
 import { Call, Dialogs, Events } from "@wailsio/runtime"
+import i18n from "../i18n.js"
 
 export const useCronStore = defineStore("cron", () => {
+  const t = (...args) => i18n.global.t(...args)
   const error = ref("")
   const toast = ref("")
   const toastKind = ref("info")
@@ -10,6 +12,7 @@ export const useCronStore = defineStore("cron", () => {
   const closeBehavior = ref("tray")
 
   const silentStart = ref(false)
+  const lightweightMode = ref(false)
   const autoStart = ref(false)
 
   const globalEnabled = ref(true)
@@ -17,11 +20,12 @@ export const useCronStore = defineStore("cron", () => {
   const jobs = ref([])
   const selectedJobId = ref("")
   const logs = ref([])
+  const editorVisible = ref(true)
 
   const form = reactive({
     id: "",
     name: "",
-    cron: "*/1 * * * *",
+    cron: "0 * * * *",
     command: "",
     args: [""],
     workDir: "",
@@ -155,6 +159,7 @@ export const useCronStore = defineStore("cron", () => {
       closeBehavior.value = settings?.closeBehavior === "exit" ? "exit" : "tray"
 
       silentStart.value = !!settings?.silentStart
+      lightweightMode.value = !!settings?.lightweightMode
       autoStart.value = !!settings?.autoStart
     } catch (e) {
       const message = String(e)
@@ -179,7 +184,7 @@ export const useCronStore = defineStore("cron", () => {
     try {
       await withTimeout(Call.ByName(`${cronServiceName}.SetGlobalEnabled`, v), 5000)
       globalEnabled.value = v
-      showToast(v ? "Enabled" : "Disabled", "success")
+      showToast(v ? t("global.enabled") : t("global.disabled"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -188,12 +193,25 @@ export const useCronStore = defineStore("cron", () => {
     }
   }
 
+  async function previewNextRun(cronExpr) {
+    const expr = typeof cronExpr === "string" ? cronExpr : ""
+    const result = await withTimeout(Call.ByName(`${cronServiceName}.PreviewNextRun`, expr), 3000)
+    if (typeof result === "string") {
+      return result
+    }
+    if (result && typeof result === "object") {
+      const candidate = result.result ?? result.data ?? result.value
+      return typeof candidate === "string" ? candidate : ""
+    }
+    return ""
+  }
+
   async function setCloseBehavior(behavior) {
     const normalized = behavior === "exit" ? "exit" : "tray"
     try {
       await withTimeout(Call.ByName(`${settingsServiceName}.SetCloseBehavior`, normalized), 5000)
       closeBehavior.value = normalized
-      showToast("Saved", "success")
+      showToast(t("toast.saved"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -207,7 +225,24 @@ export const useCronStore = defineStore("cron", () => {
     try {
       await withTimeout(Call.ByName(`${settingsServiceName}.SetSilentStart`, v), 5000)
       silentStart.value = v
-      showToast("Saved", "success")
+      if (!v) {
+        lightweightMode.value = false
+      }
+      showToast(t("toast.saved"), "success")
+    } catch (e) {
+      const message = String(e)
+      error.value = message
+      showToast(message, "danger")
+      throw e
+    }
+  }
+
+  async function setLightweightMode(enabled) {
+    const v = !!enabled
+    try {
+      await withTimeout(Call.ByName(`${settingsServiceName}.SetLightweightMode`, v), 5000)
+      lightweightMode.value = v
+      showToast(t("toast.saved"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -221,7 +256,7 @@ export const useCronStore = defineStore("cron", () => {
     try {
       await withTimeout(Call.ByName(`${settingsServiceName}.SetAutoStart`, v), 5000)
       autoStart.value = v
-      showToast("Saved", "success")
+      showToast(t("toast.saved"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -235,7 +270,7 @@ export const useCronStore = defineStore("cron", () => {
     try {
       const result = await withTimeout(Call.ByName(`${settingsServiceName}.OpenDataDir`), 5000)
       const dir = typeof result === "string" ? result : ""
-      showToast(dir ? `Opened data directory: ${dir}` : "Opened data directory", "success")
+      showToast(dir ? t("toast.opened_data_dir_with_path", { dir }) : t("toast.opened_data_dir"), "success")
       return dir
     } catch (e) {
       const message = String(e)
@@ -247,9 +282,10 @@ export const useCronStore = defineStore("cron", () => {
 
   function loadJobToForm(job) {
     selectedJobId.value = job.id
+    editorVisible.value = true
     form.id = job.id
     form.name = job.name ?? ""
-    form.cron = job.cron ?? "*/1 * * * *"
+    form.cron = job.cron ?? "0 * * * *"
     form.command = job.command ?? ""
     form.args = Array.isArray(job.args) && job.args.length ? [...job.args] : [""]
     form.workDir = job.workDir ?? ""
@@ -260,19 +296,32 @@ export const useCronStore = defineStore("cron", () => {
 
   function resetForm() {
     selectedJobId.value = ""
+    editorVisible.value = true
     form.id = ""
     form.name = ""
-    form.cron = "*/1 * * * *"
+    form.cron = "0 * * * *"
     form.command = ""
     form.args = [""]
     form.workDir = ""
     form.enabled = true
     form.maxConsecutiveFailures = 3
+    logs.value = []
+  }
+
+  async function selectJob(jobId) {
+    const id = typeof jobId === "string" ? jobId : ""
+    selectedJobId.value = id
+    editorVisible.value = false
+    if (!id) {
+      logs.value = []
+      return
+    }
+    await loadLogs(id)
   }
 
   async function saveJob() {
     error.value = ""
-    showToast("Saving...", "info")
+    showToast(t("toast.saving"), "info")
     try {
       const args = Array.isArray(form.args) ? form.args.filter((s) => s !== "") : []
 
@@ -292,13 +341,13 @@ export const useCronStore = defineStore("cron", () => {
 
       const saved = normalizeObjectResult(savedRaw)
       if (!saved?.id) {
-        throw new Error("failed to save job")
+        throw new Error(t("errors.failed_to_save_job"))
       }
 
       await refreshJobs()
       loadJobToForm(saved)
       await loadLogs(saved.id)
-      showToast("Saved", "success")
+      showToast(t("toast.saved"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -326,7 +375,7 @@ export const useCronStore = defineStore("cron", () => {
       const updatedRaw = await withTimeout(Call.ByName(`${cronServiceName}.SetJobEnabled`, job.id, !job.enabled), 5000)
       const updated = normalizeObjectResult(updatedRaw)
       if (!updated?.id) {
-        throw new Error("failed to update job")
+        throw new Error(t("errors.failed_to_update_job"))
       }
       await refreshJobs()
       if (selectedJobId.value === updated.id) {
@@ -343,7 +392,7 @@ export const useCronStore = defineStore("cron", () => {
       const entryRaw = await withTimeout(Call.ByName(`${cronServiceName}.RunNow`, jobId), 60000)
       const entry = normalizeObjectResult(entryRaw)
       if (!entry) {
-        throw new Error("failed to run job")
+        throw new Error(t("errors.failed_to_run_job"))
       }
       if (!selectedJobId.value || selectedJobId.value === jobId) {
         logs.value = [...logs.value, entry]
@@ -371,7 +420,7 @@ export const useCronStore = defineStore("cron", () => {
       )
       const entry = normalizeObjectResult(entryRaw)
       if (!entry) {
-        throw new Error("failed to run preview")
+        throw new Error(t("errors.failed_to_run_preview"))
       }
       logs.value = [...logs.value, entry]
     } catch (e) {
@@ -395,11 +444,11 @@ export const useCronStore = defineStore("cron", () => {
 
   async function clearLogs() {
     error.value = ""
-    showToast("Clearing...", "info")
+    showToast(t("toast.clearing"), "info")
     try {
       await withTimeout(Call.ByName(`${cronServiceName}.ClearLogs`), 5000)
       logs.value = []
-      showToast("Cleared", "success")
+      showToast(t("toast.cleared"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -410,13 +459,13 @@ export const useCronStore = defineStore("cron", () => {
 
   async function resetAll() {
     error.value = ""
-    showToast("Clearing...", "info")
+    showToast(t("toast.clearing"), "info")
     try {
       await withTimeout(Call.ByName(`${cronServiceName}.ResetAll`), 5000)
       resetForm()
       logs.value = []
       await refreshJobs()
-      showToast("Cleared", "success")
+      showToast(t("toast.cleared"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -427,7 +476,7 @@ export const useCronStore = defineStore("cron", () => {
 
   async function exportConfig(options = {}) {
     error.value = ""
-    showToast("Exporting...", "info")
+    showToast(t("toast.exporting"), "info")
     try {
       const exportSettings = !!options.exportSettings
       const onlyEnabled = !!options.onlyEnabled
@@ -438,14 +487,14 @@ export const useCronStore = defineStore("cron", () => {
       const defaultName = `wincron-config-${ts}.yml`
 
       const filePath = await Dialogs.SaveFile({
-        Title: "Export YAML Config",
-        ButtonText: "Export",
+        Title: t("settings.export_yaml"),
+        ButtonText: t("common.export"),
         Filename: defaultName,
         Filters: [{ DisplayName: "YAML", Pattern: "*.yml;*.yaml" }],
       })
 
       if (!filePath) {
-        showToast("Export cancelled", "info")
+        showToast(t("toast.export_cancelled"), "info")
         return
       }
 
@@ -453,7 +502,7 @@ export const useCronStore = defineStore("cron", () => {
         Call.ByName(`${configServiceName}.ExportYAMLToFile`, filePath, exportSettings, onlyEnabled),
         5000,
       )
-      showToast(path ? `Exported: ${path}` : "Exported", "success")
+      showToast(path ? t("toast.exported_with_path", { path }) : t("toast.exported"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -469,7 +518,7 @@ export const useCronStore = defineStore("cron", () => {
 
   async function importConfig(text, conflictStrategy = "coexist") {
     error.value = ""
-    showToast("Importing...", "info")
+    showToast(t("toast.importing"), "info")
     try {
       const strategy = conflictStrategy === "overwrite" ? "overwrite" : "coexist"
       await withTimeout(Call.ByName(`${configServiceName}.ImportYAML`, text, strategy), 5000)
@@ -478,7 +527,7 @@ export const useCronStore = defineStore("cron", () => {
       await refreshJobs()
       await loadGlobalEnabled()
       await loadSettings()
-      showToast("Imported", "success")
+      showToast(t("toast.imported"), "success")
     } catch (e) {
       const message = String(e)
       error.value = message
@@ -505,7 +554,10 @@ export const useCronStore = defineStore("cron", () => {
       }
 
       const ok = entry.exitCode === 0
-      showToast(`${entry.jobName}: ${ok ? "OK" : `FAIL (exit=${entry.exitCode})`}`, ok ? "success" : "danger")
+      showToast(
+        `${entry.jobName}: ${ok ? t("common.ok") : `${t("common.fail")} (exit=${entry.exitCode})`}`,
+        ok ? "success" : "danger",
+      )
 
       await refreshJobs()
       if (selectedJobId.value) {
@@ -538,14 +590,17 @@ export const useCronStore = defineStore("cron", () => {
     toastKind,
     closeBehavior,
     silentStart,
+    lightweightMode,
     autoStart,
     globalEnabled,
     jobs,
     selectedJobId,
     logs,
+    editorVisible,
     form,
     refreshJobs,
     loadJobToForm,
+    selectJob,
     resetForm,
     saveJob,
     deleteJob,
@@ -562,8 +617,10 @@ export const useCronStore = defineStore("cron", () => {
     loadGlobalEnabled,
     setCloseBehavior,
     setSilentStart,
+    setLightweightMode,
     setAutoStart,
     setGlobalEnabled,
+    previewNextRun,
     openDataDir,
     init,
     dispose,

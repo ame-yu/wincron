@@ -92,9 +92,32 @@ func (s *CronService) ListJobs() ([]Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
 	jobs := make([]Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		jobs = append(jobs, j)
+		jj := j
+		jj.NextRunAt = ""
+		if jj.Enabled {
+			if entryID, ok := s.entries[jj.ID]; ok {
+				entry := s.scheduler.Entry(entryID)
+				if !entry.Next.IsZero() {
+					jj.NextRunAt = entry.Next.Format(time.RFC3339)
+				}
+			}
+
+			if jj.NextRunAt == "" {
+				expr := strings.TrimSpace(jj.Cron)
+				if expr != "" {
+					if schedule, err := s.parser.Parse(expr); err == nil {
+						next := schedule.Next(now)
+						if !next.IsZero() {
+							jj.NextRunAt = next.Format(time.RFC3339)
+						}
+					}
+				}
+			}
+		}
+		jobs = append(jobs, jj)
 	}
 	return jobs, nil
 }
@@ -131,7 +154,26 @@ func (s *CronService) ListJobs() ([]Job, error) {
 	return nil
  }
 
+func (s *CronService) PreviewNextRun(cronExpr string) (string, error) {
+	expr := strings.TrimSpace(cronExpr)
+	if expr == "" {
+		return "", errors.New("cron is required")
+	}
+
+	schedule, err := s.parser.Parse(expr)
+	if err != nil {
+		return "", fmt.Errorf("invalid cron: %w", err)
+	}
+
+	next := schedule.Next(time.Now())
+	if next.IsZero() {
+		return "", errors.New("failed to compute next run")
+	}
+	return next.Format(time.RFC3339), nil
+}
+
 func (s *CronService) UpsertJob(job Job) (Job, error) {
+	job.NextRunAt = ""
 	if job.Cron == "" {
 		return Job{}, errors.New("cron is required")
 	}
@@ -154,6 +196,8 @@ func (s *CronService) UpsertJob(job Job) (Job, error) {
 	}
 	if prev, ok := s.jobs[job.ID]; ok {
 		job.ConsecutiveFailures = prev.ConsecutiveFailures
+		job.ExecutedCount = prev.ExecutedCount
+		job.LastExecutedAt = prev.LastExecutedAt
 		if job.MaxConsecutiveFailures <= 0 {
 			job.MaxConsecutiveFailures = prev.MaxConsecutiveFailures
 		}
@@ -213,7 +257,7 @@ func (s *CronService) RunNow(id string) (JobLogEntry, error) {
 		return JobLogEntry{}, errors.New("job not found")
 	}
 	entry := s.execute(job)
-	_ = s.applyExecutionResult(id, entry.ExitCode == 0)
+	_ = s.applyExecutionResult(id, entry.ExitCode == 0, entry.FinishedAt)
 	if err := s.appendLog(entry); err != nil {
 		return JobLogEntry{}, err
 	}
@@ -286,6 +330,7 @@ func (s *CronService) reloadFromDisk() {
 	defer s.mu.Unlock()
 
 	for _, j := range jobs {
+		j.NextRunAt = ""
 		if j.MaxConsecutiveFailures <= 0 {
 			j.MaxConsecutiveFailures = 3
 		}
@@ -351,13 +396,13 @@ func (s *CronService) runScheduled(id string) {
 		return
 	}
 	entry := s.execute(job)
-	_ = s.applyExecutionResult(id, entry.ExitCode == 0)
+	_ = s.applyExecutionResult(id, entry.ExitCode == 0, entry.FinishedAt)
 	if err := s.appendLog(entry); err == nil {
 		s.notifyExecuted(entry)
 	}
 }
 
- func (s *CronService) applyExecutionResult(id string, ok bool) error {
+ func (s *CronService) applyExecutionResult(id string, ok bool, executedAt string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -372,6 +417,13 @@ func (s *CronService) runScheduled(id string) {
 	prevEnabled := job.Enabled
 	prevFailures := job.ConsecutiveFailures
 	prevMax := job.MaxConsecutiveFailures
+	prevExecutedCount := job.ExecutedCount
+	prevLastExecutedAt := job.LastExecutedAt
+
+	job.ExecutedCount++
+	if executedAt != "" {
+		job.LastExecutedAt = executedAt
+	}
 
 	if ok {
 		job.ConsecutiveFailures = 0
@@ -382,7 +434,7 @@ func (s *CronService) runScheduled(id string) {
 		}
 	}
 
-	changed := job.Enabled != prevEnabled || job.ConsecutiveFailures != prevFailures || job.MaxConsecutiveFailures != prevMax
+	changed := job.Enabled != prevEnabled || job.ConsecutiveFailures != prevFailures || job.MaxConsecutiveFailures != prevMax || job.ExecutedCount != prevExecutedCount || job.LastExecutedAt != prevLastExecutedAt
 	if !changed {
 		return nil
 	}

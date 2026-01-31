@@ -2,20 +2,17 @@
 
 # wincron
 
-A lightweight task scheduler for Windows. Create cron-like jobs to run commands on a schedule, and view execution logs.
+A lightweight task scheduler for Windows, intended to be more intuitive than the built-in Task Scheduler.
 
 ## Features
 
-- Designed to be lightweight and low-overhead when idle
-- Cron-style scheduling for command execution (robfig/cron)
-- Run any executable with arguments and a working directory
-- Run now + preview run to validate commands before scheduling
-- Detailed execution logs (stdout/stderr/exit code) with log cleanup
+- Lightweight design: low overhead when idle
+- Use cron expressions to schedule and run tasks
+- Support command arguments and working directory
+- View execution logs
 - Failure protection: auto-disable after N consecutive failures
-- YAML import/export for jobs (and optional settings), with conflict strategies
-- Open the local data directory for easy backup/migration
-- Tray-friendly behavior, optional silent start, and auto-start on login
-- Desktop UI built with Wails3 + Vue3
+- YAML import/export for jobs (optional settings export)
+- Tray-friendly: minimize to tray, optional silent start, and auto-start on boot
 
 ## Screenshots
 
@@ -34,23 +31,9 @@ A lightweight task scheduler for Windows. Create cron-like jobs to run commands 
 
    `go install -v github.com/wailsapp/wails/v3/cmd/wails3@latest`
 
-2. Install frontend dependencies:
+2. Build (outputs to `bin/` by default):
 
-   `bun install`
-
-3. Run in development mode:
-
-   `task dev`
-
-## Quick Start
-
-1. Start the app.
-2. Create a job:
-   - Name
-   - Cron expression (e.g. `*/5 * * * *`)
-   - Command and arguments
-   - Working directory (optional)
-3. Save and enable the job.
+   `wails3 build`
 
 ## Development Environment
 
