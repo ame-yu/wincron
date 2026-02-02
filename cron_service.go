@@ -7,12 +7,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
+)
+
+const (
+	windowsCreateNewConsole = 0x00000010
+	windowsDetachedProcess  = 0x00000008
+	windowsCreateNoWindow   = 0x08000000
 )
 
 type CronService struct {
@@ -24,17 +33,82 @@ type CronService struct {
 	scheduler *cron.Cron
 	parser    cron.Parser
 	entries   map[string]cron.EntryID
+	running   map[string]map[string]*runningJobInstance
 	globalEnabled bool
 	onExecuted func(JobLogEntry)
 }
 
-func renderCommandLine(command string, args []string) string {
-	parts := make([]string, 0, 1+len(args))
-	parts = append(parts, command)
-	for _, a := range args {
-		parts = append(parts, a)
+type runningJobInstance struct {
+	cmd *exec.Cmd
+}
+
+func applyJobConsoleMode(cmd *exec.Cmd, console bool) {
+	if cmd == nil {
+		return
 	}
-	return strings.Join(parts, " ")
+	if runtime.GOOS != "windows" {
+		return
+	}
+
+	attr := cmd.SysProcAttr
+	if attr == nil {
+		attr = &syscall.SysProcAttr{}
+	}
+	attrV := reflect.ValueOf(attr).Elem()
+
+	setHideWindow := func(v bool) {
+		hide := attrV.FieldByName("HideWindow")
+		if hide.IsValid() && hide.CanSet() && hide.Kind() == reflect.Bool {
+			hide.SetBool(v)
+		}
+	}
+
+	updateCreationFlags := func(update func(current uint64) uint64) {
+		cf := attrV.FieldByName("CreationFlags")
+		if !cf.IsValid() || !cf.CanSet() {
+			return
+		}
+		switch cf.Kind() {
+		case reflect.Uint, reflect.Uint32, reflect.Uint64:
+			cf.SetUint(update(cf.Uint()))
+		}
+	}
+
+	if console {
+		setHideWindow(false)
+		updateCreationFlags(func(current uint64) uint64 {
+			current |= uint64(windowsCreateNewConsole)
+			current &^= uint64(windowsCreateNoWindow | windowsDetachedProcess)
+			return current
+		})
+	} else {
+		setHideWindow(true)
+		updateCreationFlags(func(current uint64) uint64 {
+			current |= uint64(windowsCreateNoWindow | windowsDetachedProcess)
+			current &^= uint64(windowsCreateNewConsole)
+			return current
+		})
+	}
+
+	cmd.SysProcAttr = attr
+}
+
+func renderCommandLine(command string, args []string) string {
+	return strings.Join(append([]string{command}, args...), " ")
+}
+
+func normalizeConcurrencyPolicy(policy string) string {
+	v := strings.ToLower(strings.TrimSpace(policy))
+	switch v {
+	case "", "skip":
+		return "skip"
+	case "kill_old":
+		return "kill_old"
+	case "allow":
+		return "allow"
+	default:
+		return "skip"
+	}
 }
 
 func NewCronService() *CronService {
@@ -52,6 +126,7 @@ func NewCronService() *CronService {
 		scheduler: c,
 		parser:    parser,
 		entries:   map[string]cron.EntryID{},
+		running:   map[string]map[string]*runningJobInstance{},
 		globalEnabled: true,
 	}
 
@@ -98,28 +173,39 @@ func (s *CronService) ListJobs() ([]Job, error) {
 		jj := j
 		jj.NextRunAt = ""
 		if jj.Enabled {
-			if entryID, ok := s.entries[jj.ID]; ok {
-				entry := s.scheduler.Entry(entryID)
-				if !entry.Next.IsZero() {
-					jj.NextRunAt = entry.Next.Format(time.RFC3339)
-				}
-			}
-
-			if jj.NextRunAt == "" {
-				expr := strings.TrimSpace(jj.Cron)
-				if expr != "" {
-					if schedule, err := s.parser.Parse(expr); err == nil {
-						next := schedule.Next(now)
-						if !next.IsZero() {
-							jj.NextRunAt = next.Format(time.RFC3339)
-						}
-					}
-				}
-			}
+			jj.NextRunAt = s.computeNextRunAt(jj.ID, jj, now)
 		}
 		jobs = append(jobs, jj)
 	}
 	return jobs, nil
+}
+
+func (s *CronService) computeNextRunAt(jobID string, job Job, now time.Time) string {
+	if jobID == "" {
+		jobID = job.ID
+	}
+	if jobID == "" {
+		return ""
+	}
+
+	if entryID, ok := s.entries[jobID]; ok {
+		entry := s.scheduler.Entry(entryID)
+		if !entry.Next.IsZero() {
+			return entry.Next.Format(time.RFC3339)
+		}
+	}
+
+	expr := strings.TrimSpace(job.Cron)
+	if expr == "" {
+		return ""
+	}
+	if schedule, err := s.parser.Parse(expr); err == nil {
+		next := schedule.Next(now)
+		if !next.IsZero() {
+			return next.Format(time.RFC3339)
+		}
+	}
+	return ""
 }
 
  func (s *CronService) GetGlobalEnabled() (bool, error) {
@@ -198,10 +284,14 @@ func (s *CronService) UpsertJob(job Job) (Job, error) {
 		job.ConsecutiveFailures = prev.ConsecutiveFailures
 		job.ExecutedCount = prev.ExecutedCount
 		job.LastExecutedAt = prev.LastExecutedAt
+		if strings.TrimSpace(job.ConcurrencyPolicy) == "" {
+			job.ConcurrencyPolicy = prev.ConcurrencyPolicy
+		}
 		if job.MaxConsecutiveFailures <= 0 {
 			job.MaxConsecutiveFailures = prev.MaxConsecutiveFailures
 		}
 	}
+	job.ConcurrencyPolicy = normalizeConcurrencyPolicy(job.ConcurrencyPolicy)
 	if job.MaxConsecutiveFailures <= 0 {
 		job.MaxConsecutiveFailures = 3
 	}
@@ -256,13 +346,20 @@ func (s *CronService) RunNow(id string) (JobLogEntry, error) {
 	if !ok {
 		return JobLogEntry{}, errors.New("job not found")
 	}
-	entry := s.execute(job)
-	_ = s.applyExecutionResult(id, entry.ExitCode == 0, entry.FinishedAt)
-	if err := s.appendLog(entry); err != nil {
+	entry, err := s.runJobWithPolicy(job, "manual")
+	if err != nil {
 		return JobLogEntry{}, err
 	}
-	s.notifyExecuted(entry)
-	return entry, nil
+	if entry == nil {
+		return JobLogEntry{}, errors.New("skipped")
+	}
+	entryV := *entry
+	_ = s.applyExecutionResult(id, entryV.ExitCode == 0, entryV.FinishedAt)
+	if err := s.appendLog(entryV); err != nil {
+		return JobLogEntry{}, err
+	}
+	s.notifyExecuted(entryV)
+	return entryV, nil
 }
 
 func (s *CronService) RunPreview(req PreviewRunRequest) (JobLogEntry, error) {
@@ -286,15 +383,81 @@ func (s *CronService) RunPreview(req PreviewRunRequest) (JobLogEntry, error) {
 		Command: req.Command,
 		Args:    req.Args,
 		WorkDir: req.WorkDir,
+		Console: req.Console,
 		Enabled: true,
 	}
 
-	entry := s.execute(job)
+	entry := s.execute(job, "")
 	if err := s.appendLog(entry); err != nil {
 		return JobLogEntry{}, err
 	}
 	s.notifyExecuted(entry)
 	return entry, nil
+}
+
+func (s *CronService) runningCommands(jobID string) []*exec.Cmd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	instances := s.running[jobID]
+	if len(instances) == 0 {
+		return nil
+	}
+	cmds := make([]*exec.Cmd, 0, len(instances))
+	for _, inst := range instances {
+		if inst == nil || inst.cmd == nil || inst.cmd.Process == nil {
+			continue
+		}
+		cmds = append(cmds, inst.cmd)
+	}
+	return cmds
+}
+
+func (s *CronService) reserveExecutionLocked(jobID string, policy string) (string, bool) {
+	if policy == "skip" {
+		if m := s.running[jobID]; len(m) > 0 {
+			return "", true
+		}
+	}
+	if s.running == nil {
+		s.running = map[string]map[string]*runningJobInstance{}
+	}
+	instanceID := uuid.NewString()
+	m := s.running[jobID]
+	if m == nil {
+		m = map[string]*runningJobInstance{}
+		s.running[jobID] = m
+	}
+	m[instanceID] = &runningJobInstance{}
+	return instanceID, false
+}
+
+func (s *CronService) runJobWithPolicy(job Job, source string) (*JobLogEntry, error) {
+	job.ConcurrencyPolicy = normalizeConcurrencyPolicy(job.ConcurrencyPolicy)
+
+	if job.ConcurrencyPolicy == "kill_old" {
+		cmds := s.runningCommands(job.ID)
+		for _, cmd := range cmds {
+			if cmd == nil || cmd.Process == nil {
+				continue
+			}
+			_ = cmd.Process.Kill()
+		}
+	}
+
+	s.mu.Lock()
+	instanceID, alreadyRunning := s.reserveExecutionLocked(job.ID, job.ConcurrencyPolicy)
+	s.mu.Unlock()
+
+	if alreadyRunning {
+		if source == "manual" {
+			return nil, errors.New("job is already running")
+		}
+		return nil, nil
+	}
+
+	entry := s.execute(job, instanceID)
+	return &entry, nil
 }
 
 func (s *CronService) ListLogs(jobID string, limit int) ([]JobLogEntry, error) {
@@ -331,6 +494,7 @@ func (s *CronService) reloadFromDisk() {
 
 	for _, j := range jobs {
 		j.NextRunAt = ""
+		j.ConcurrencyPolicy = normalizeConcurrencyPolicy(j.ConcurrencyPolicy)
 		if j.MaxConsecutiveFailures <= 0 {
 			j.MaxConsecutiveFailures = 3
 		}
@@ -395,10 +559,14 @@ func (s *CronService) runScheduled(id string) {
 	if !job.Enabled {
 		return
 	}
-	entry := s.execute(job)
-	_ = s.applyExecutionResult(id, entry.ExitCode == 0, entry.FinishedAt)
-	if err := s.appendLog(entry); err == nil {
-		s.notifyExecuted(entry)
+	entry, err := s.runJobWithPolicy(job, "scheduled")
+	if err != nil || entry == nil {
+		return
+	}
+	entryV := *entry
+	_ = s.applyExecutionResult(id, entryV.ExitCode == 0, entryV.FinishedAt)
+	if err := s.appendLog(entryV); err == nil {
+		s.notifyExecuted(entryV)
 	}
 }
 
@@ -467,12 +635,23 @@ func (s *CronService) notifyExecuted(entry JobLogEntry) {
 	go f(entry)
 }
 
-func (s *CronService) execute(job Job) JobLogEntry {
+func (s *CronService) execute(job Job, runningInstanceID string) JobLogEntry {
 	start := time.Now()
 
 	cmd := exec.Command(job.Command, job.Args...)
 	if job.WorkDir != "" {
 		cmd.Dir = job.WorkDir
+	}
+	applyJobConsoleMode(cmd, job.Console)
+
+	if runningInstanceID != "" {
+		s.mu.Lock()
+		if instances, ok := s.running[job.ID]; ok {
+			if inst, ok := instances[runningInstanceID]; ok {
+				inst.cmd = cmd
+			}
+		}
+		s.mu.Unlock()
 	}
 
 	var outBuf bytes.Buffer
@@ -480,7 +659,10 @@ func (s *CronService) execute(job Job) JobLogEntry {
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	runErr := cmd.Run()
+	runErr := cmd.Start()
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
 
 	exitCode := 0
 	errText := ""
@@ -494,6 +676,17 @@ func (s *CronService) execute(job Job) JobLogEntry {
 	}
 
 	end := time.Now()
+
+	if runningInstanceID != "" {
+		s.mu.Lock()
+		if instances, ok := s.running[job.ID]; ok {
+			delete(instances, runningInstanceID)
+			if len(instances) == 0 {
+				delete(s.running, job.ID)
+			}
+		}
+		s.mu.Unlock()
+	}
 
 	stdout := truncateString(outBuf.String(), 16*1024)
 	stderr := truncateString(errBuf.String(), 16*1024)

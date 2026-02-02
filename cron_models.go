@@ -7,6 +7,8 @@ type Job struct {
 	Command                 string   `json:"command" yaml:"command"`
 	Args                    []string `json:"args" yaml:"args"`
 	WorkDir                 string   `json:"workDir" yaml:"workDir"`
+	Console                 bool     `json:"console,omitempty" yaml:"console,omitempty"`
+	ConcurrencyPolicy       string   `json:"concurrencyPolicy,omitempty" yaml:"concurrencyPolicy,omitempty"`
 	Enabled                 bool     `json:"enabled" yaml:"enabled"`
 	MaxConsecutiveFailures  int      `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
 	ConsecutiveFailures     int      `json:"consecutiveFailures" yaml:"consecutiveFailures"`
@@ -19,6 +21,7 @@ type PreviewRunRequest struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
 	WorkDir string   `json:"workDir"`
+	Console bool `json:"console"`
 	JobID   string   `json:"jobId"`
 	JobName string   `json:"jobName"`
 }

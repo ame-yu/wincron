@@ -37,8 +37,8 @@ A lightweight task scheduler for Windows, intended to be more intuitive than the
 
 ## Development Environment
 
-- Go: `1.25` (see `go.mod`)
-- Wails: `v3.0.0-alpha.60` (see `go.mod`)
-- Frontend runtime: `@wailsio/runtime@3.0.0-alpha.78` (see `frontend/package.json`)
-- Bun: recommended (repo includes `frontend/bun.lock`)
-- Node.js: optional if you prefer npm/pnpm over Bun (recommend 18+)
+- Go: `1.25`
+- Wails: `v3.0.0-alpha.60`
+- Frontend runtime: `@wailsio/runtime@3.0.0-alpha.78`
+- Bun: `v1.0` or above
+- Node.js: optional if you prefer npm/pnpm over Bun

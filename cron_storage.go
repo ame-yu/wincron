@@ -17,18 +17,10 @@ func newJobStore(path string) *jobStore {
 }
 
 func (s *jobStore) load() ([]Job, error) {
-	b, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []Job{}, nil
-		}
-		return nil, err
-	}
 	var jobs []Job
-	if len(b) == 0 {
-		return []Job{}, nil
-	}
-	err = json.Unmarshal(b, &jobs)
+	err := readJSONOrDefault(s.path, &jobs, func() {
+		jobs = []Job{}
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -36,18 +28,7 @@ func (s *jobStore) load() ([]Job, error) {
 }
 
 func (s *jobStore) save(jobs []Job) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(jobs, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return writeJSONAtomic(s.path, jobs)
 }
 
 type logStore struct {

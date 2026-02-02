@@ -135,7 +135,8 @@ func main() {
 				return
 			}
 
-			if lightweightClosing.Load() || settingsSvc.getLightweightMode() {
+			// Internal close for enabling lightweight mode should not be affected by closeBehavior.
+			if lightweightClosing.Load() {
 				mainWindowMu.Lock()
 				if mainWindow == w {
 					mainWindow = nil
@@ -144,13 +145,24 @@ func main() {
 				return
 			}
 
-			if settingsSvc.getCloseBehavior() == CloseBehaviorTray {
-				w.Hide()
-				e.Cancel()
+			if settingsSvc.getCloseBehavior() == CloseBehaviorExit {
+				quitting.Store(true)
+				app.Quit()
 				return
 			}
-			quitting.Store(true)
-			app.Quit()
+
+			// CloseBehaviorTray: either hide window, or destroy webview when lightweight mode is enabled.
+			if settingsSvc.getLightweightMode() {
+				mainWindowMu.Lock()
+				if mainWindow == w {
+					mainWindow = nil
+				}
+				mainWindowMu.Unlock()
+				return
+			}
+
+			w.Hide()
+			e.Cancel()
 		})
 
 		return w
@@ -178,7 +190,7 @@ func main() {
 		lightweightClosing.Store(false)
 	}
 
-	if !settingsSvc.getLightweightMode() && !settingsSvc.getSilentStart() {
+	if !settingsSvc.getSilentStart() {
 		mainWindow = createMainWindow()
 	}
 
@@ -236,7 +248,7 @@ func main() {
 			w := ensureMainWindow()
 			w.Show()
 			w.Focus()
-			app.Event.Emit("navigate", "settings")
+			app.Event.Emit("navigate", "Settings")
 		})
 
 		trayMenu.Add("Quit").OnClick(func(_ *application.Context) {

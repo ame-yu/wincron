@@ -37,7 +37,7 @@ function onSortKeyChange(e) {
     <button
       :title="$t(sortAsc ? 'main.jobs.sort.asc' : 'main.jobs.sort.desc')"
       type="button"
-      :class="btnClass + ' -ml-px rounded-l-none px-2 focus:relative focus:z-10'"
+      :class="btnClass + ' -ml-px rounded-l-none px-2 text-base font-semibold focus:relative focus:z-10'"
       @click="toggleSortDir"
     >
       {{ sortAsc ? "↑" : "↓" }}

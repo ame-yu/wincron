@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -43,18 +42,8 @@ func newSettingsStore(path string) *settingsStore {
 }
 
 func (s *settingsStore) load() (AppSettings, error) {
-	b, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return defaultAppSettings(), nil
-		}
-		return AppSettings{}, err
-	}
-	if len(b) == 0 {
-		return defaultAppSettings(), nil
-	}
-	var settings AppSettings
-	if err := json.Unmarshal(b, &settings); err != nil {
+	settings := defaultAppSettings()
+	if err := readJSONOrDefault(s.path, &settings, func() {}); err != nil {
 		return AppSettings{}, err
 	}
 	if settings.CloseBehavior != CloseBehaviorExit && settings.CloseBehavior != CloseBehaviorTray {
@@ -64,25 +53,11 @@ func (s *settingsStore) load() (AppSettings, error) {
 		settings.WindowWidth = 0
 		settings.WindowHeight = 0
 	}
-	if !settings.SilentStart {
-		settings.LightweightMode = false
-	}
 	return settings, nil
 }
 
 func (s *settingsStore) save(settings AppSettings) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return writeJSONAtomic(s.path, settings)
 }
 
 type SettingsService struct {
@@ -106,7 +81,6 @@ func (s *SettingsService) GetSettings() (AppSettings, error) {
 	defer s.mu.RUnlock()
 	return s.settings, nil
 }
-
 
 func escapePowerShellSingleQuoted(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
@@ -184,9 +158,6 @@ func (s *SettingsService) SetSettings(settings AppSettings) error {
 		settings.WindowWidth = 0
 		settings.WindowHeight = 0
 	}
-	if !settings.SilentStart {
-		settings.LightweightMode = false
-	}
 
 	s.mu.RLock()
 	prev := s.settings
@@ -237,18 +208,13 @@ func (s *SettingsService) SetCloseBehavior(behavior string) error {
 func (s *SettingsService) SetSilentStart(enabled bool) error {
 	s.mu.Lock()
 	prev := s.settings.SilentStart
-	prevLightweight := s.settings.LightweightMode
 	s.settings.SilentStart = enabled
-	if !enabled {
-		s.settings.LightweightMode = false
-	}
 	settings := s.settings
 	s.mu.Unlock()
 
 	if err := s.store.save(settings); err != nil {
 		s.mu.Lock()
 		s.settings.SilentStart = prev
-		s.settings.LightweightMode = prevLightweight
 		s.mu.Unlock()
 		return err
 	}
@@ -284,10 +250,6 @@ func (s *SettingsService) SetLightweightMode(enabled bool) error {
 	s.mu.Lock()
 	prev := s.settings.LightweightMode
 	prevSilent := s.settings.SilentStart
-	if enabled && !s.settings.SilentStart {
-		s.mu.Unlock()
-		return errors.New("lightweightMode requires silentStart")
-	}
 	s.settings.LightweightMode = enabled
 	settings := s.settings
 	s.mu.Unlock()
@@ -383,4 +345,15 @@ func (s *SettingsService) OpenDataDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+func (s *SettingsService) OpenEnvironmentVariables() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("environment variables dialog is only supported on windows")
+	}
+	cmd := exec.Command("rundll32.exe", "sysdm.cpl,EditEnvironmentVariables")
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return nil
 }

@@ -13,6 +13,22 @@ import (
 
 const windowsServiceName = "wincron"
 
+func withWindowsService(fn func(*mgr.Service) error) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(windowsServiceName)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	return fn(s)
+}
+
 func handleServiceCommand(args []string) (handled bool, err error) {
 	if len(args) == 0 {
 		return false, nil
@@ -77,65 +93,37 @@ func installService() error {
 }
 
 func uninstallService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(windowsServiceName)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	return s.Delete()
+	return withWindowsService(func(s *mgr.Service) error {
+		return s.Delete()
+	})
 }
 
 func startService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(windowsServiceName)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	return s.Start()
+	return withWindowsService(func(s *mgr.Service) error {
+		return s.Start()
+	})
 }
 
 func stopService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(windowsServiceName)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-
-	status, err := s.Control(svc.Stop)
-	if err != nil {
-		return err
-	}
-
-	timeout := time.Now().Add(15 * time.Second)
-	for status.State != svc.Stopped {
-		if time.Now().After(timeout) {
-			return errors.New("timeout waiting for service to stop")
-		}
-		time.Sleep(300 * time.Millisecond)
-		status, err = s.Query()
+	return withWindowsService(func(s *mgr.Service) error {
+		status, err := s.Control(svc.Stop)
 		if err != nil {
 			return err
 		}
-	}
-	return nil
+
+		timeout := time.Now().Add(15 * time.Second)
+		for status.State != svc.Stopped {
+			if time.Now().After(timeout) {
+				return errors.New("timeout waiting for service to stop")
+			}
+			time.Sleep(300 * time.Millisecond)
+			status, err = s.Query()
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func runService() error {

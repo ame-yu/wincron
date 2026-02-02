@@ -8,7 +8,7 @@ import { useCronStore } from "./stores/cron.js"
 import { setAppLocale } from "./i18n.js"
 
 const cron = useCronStore()
-const { toast, toastKind, globalEnabled } = storeToRefs(cron)
+const { toast, toastKind, toastActionLabel, globalEnabled } = storeToRefs(cron)
 
 const { t, locale } = useI18n()
 
@@ -87,13 +87,25 @@ onUnmounted(() => {
 
 <template>
   <div class="relative min-h-screen bg-slate-50 text-slate-900 font-sans">
-    <div
-      v-if="toast"
-      class="fixed top-3 right-3 z-[9999] max-w-[380px] rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.08)] data-[kind=success]:border-green-600/25 data-[kind=success]:bg-green-50 data-[kind=danger]:border-red-600/25 data-[kind=danger]:bg-red-50 sm:top-4 sm:right-4"
-      :data-kind="toastKind"
-    >
-      {{ toast }}
-    </div>
+    <Transition name="toast" appear>
+      <div
+        v-if="toast"
+        class="fixed right-3 bottom-3 z-[9999] max-w-[380px] rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.08)] data-[kind=success]:border-green-600/25 data-[kind=success]:bg-green-50 data-[kind=danger]:border-red-600/25 data-[kind=danger]:bg-red-50 sm:right-4 sm:bottom-4"
+        :data-kind="toastKind"
+      >
+        <div class="flex items-center gap-3">
+          <div class="min-w-0 flex-1">{{ toast }}</div>
+          <button
+            v-if="toastActionLabel"
+            type="button"
+            class="shrink-0 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-slate-800 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20"
+            @click.stop="cron.triggerToastAction"
+          >
+            {{ toastActionLabel }}
+          </button>
+        </div>
+      </div>
+    </Transition>
 
     <header class="sticky top-0 z-[9998] border-b border-slate-200 bg-slate-50">
       <div class="mx-auto flex max-w-[1240px] items-center justify-between gap-3 px-3 py-2 sm:px-5 sm:py-3">
@@ -133,7 +145,7 @@ onUnmounted(() => {
         <div class="flex items-center gap-2.5">
           <select
             v-model="appLocale"
-            class="h-8 min-w-[120px] appearance-none rounded-xl border border-slate-200 bg-white px-2.5 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
+            class="h-8 w-auto appearance-none rounded-xl border border-slate-200 bg-white px-2 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
             :title="$t('app.language')"
           >
             <option value="en">🇺🇸 EN</option>

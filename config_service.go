@@ -12,6 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var CONFIG_VERSION = 2
+
 type ConfigService struct {
 	cron     *CronService
 	settings *SettingsService
@@ -30,37 +32,56 @@ type exportedConfig struct {
 	ExportedAt string            `yaml:"exportedAt,omitempty"`
 	Settings   *AppSettings      `yaml:"settings,omitempty"`
 	Cron       *exportedCronConfig `yaml:"cron,omitempty"`
-	Jobs       []Job             `yaml:"jobs"`
+	Jobs       *[]Job            `yaml:"jobs,omitempty"`
 }
 
-func (s *ConfigService) ExportYAML(exportSettings bool, onlyEnabled bool) (string, error) {
-	jobs, err := s.cron.ListJobs()
-	if err != nil {
-		return "", err
+func normalizeJobName(name string, command string) string {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		n = strings.TrimSpace(command)
 	}
-	if onlyEnabled {
-		filtered := make([]Job, 0, len(jobs))
-		for _, j := range jobs {
-			if j.Enabled {
-				filtered = append(filtered, j)
-			}
-		}
-		jobs = filtered
+	return n
+}
+
+
+func (s *ConfigService) ExportYAML(exportJobs bool, exportSettings bool, onlyEnabled bool) (string, error) {
+	if !exportJobs {
+		onlyEnabled = false
 	}
 
-	sort.Slice(jobs, func(i, j int) bool {
-		ni := strings.ToLower(strings.TrimSpace(jobs[i].Name))
-		nj := strings.ToLower(strings.TrimSpace(jobs[j].Name))
-		if ni == nj {
-			return jobs[i].ID < jobs[j].ID
+	var jobs []Job
+	if exportJobs {
+		listed, err := s.cron.ListJobs()
+		if err != nil {
+			return "", err
 		}
-		return ni < nj
-	})
+		jobs = listed
+		if onlyEnabled {
+			filtered := make([]Job, 0, len(jobs))
+			for _, j := range jobs {
+				if j.Enabled {
+					filtered = append(filtered, j)
+				}
+			}
+			jobs = filtered
+		}
+
+		sort.Slice(jobs, func(i, j int) bool {
+			ni := strings.ToLower(strings.TrimSpace(jobs[i].Name))
+			nj := strings.ToLower(strings.TrimSpace(jobs[j].Name))
+			if ni == nj {
+				return jobs[i].ID < jobs[j].ID
+			}
+			return ni < nj
+		})
+	}
 
 	cfg := exportedConfig{
-		Version:    1,
+		Version:    CONFIG_VERSION,
 		ExportedAt: time.Now().Format(time.RFC3339),
-		Jobs:       jobs,
+	}
+	if exportJobs {
+		cfg.Jobs = &jobs
 	}
 
 	if exportSettings {
@@ -83,7 +104,7 @@ func (s *ConfigService) ExportYAML(exportSettings bool, onlyEnabled bool) (strin
 	return string(b), nil
 }
 
-func (s *ConfigService) ExportYAMLToFile(filePath string, exportSettings bool, onlyEnabled bool) (string, error) {
+func (s *ConfigService) ExportYAMLToFile(filePath string, exportJobs bool, exportSettings bool, onlyEnabled bool) (string, error) {
 	if filePath == "" {
 		return "", errors.New("filePath is required")
 	}
@@ -98,7 +119,7 @@ func (s *ConfigService) ExportYAMLToFile(filePath string, exportSettings bool, o
 		return "", err
 	}
 
-	y, err := s.ExportYAML(exportSettings, onlyEnabled)
+	y, err := s.ExportYAML(exportJobs, exportSettings, onlyEnabled)
 	if err != nil {
 		return "", err
 	}
@@ -120,10 +141,7 @@ func (s *ConfigService) CheckImportYAMLConflicts(yamlText string) ([]string, err
 	}
 	nameSet := make(map[string]struct{}, len(existing))
 	for _, j := range existing {
-		name := strings.TrimSpace(j.Name)
-		if name == "" {
-			name = strings.TrimSpace(j.Command)
-		}
+		name := normalizeJobName(j.Name, j.Command)
 		if name != "" {
 			nameSet[name] = struct{}{}
 		}
@@ -131,10 +149,7 @@ func (s *ConfigService) CheckImportYAMLConflicts(yamlText string) ([]string, err
 
 	conflicts := make(map[string]struct{})
 	for _, j := range jobs {
-		name := strings.TrimSpace(j.Name)
-		if name == "" {
-			name = strings.TrimSpace(j.Command)
-		}
+		name := normalizeJobName(j.Name, j.Command)
 		if name == "" {
 			continue
 		}
@@ -171,10 +186,7 @@ func (s *ConfigService) ImportYAML(yamlText string, conflictStrategy string) err
 	}
 	existingByName := make(map[string]Job, len(existing))
 	for _, j := range existing {
-		name := strings.TrimSpace(j.Name)
-		if name == "" {
-			name = strings.TrimSpace(j.Command)
-		}
+		name := normalizeJobName(j.Name, j.Command)
 		if name != "" {
 			existingByName[name] = j
 		}
@@ -253,7 +265,9 @@ func parseYAMLConfig(b []byte) (jobs []Job, settings *AppSettings, globalEnabled
 	if err = yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, nil, nil, err
 	}
-	jobs = cfg.Jobs
+	if cfg.Jobs != nil {
+		jobs = *cfg.Jobs
+	}
 	settings = cfg.Settings
 	if cfg.Cron != nil {
 		ge := cfg.Cron.GlobalEnabled
