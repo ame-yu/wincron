@@ -10,10 +10,26 @@ const props = defineProps({
 })
 
 const cron = useCronStore()
-const { error, editorVisible } = storeToRefs(cron)
+const { error, editorVisible, editorPulse } = storeToRefs(cron)
 const form = cron.form
 
 const showAdvanced = ref(false)
+
+const validProcessCreationFlags = new Set(["CREATE_NEW_CONSOLE", "CREATE_NO_WINDOW", "DETACHED_PROCESS"])
+
+const normalizeProcessCreationFlag = (value) => {
+  const v = String(value ?? "")
+  return validProcessCreationFlags.has(v) ? v : ""
+}
+
+const flagProcessCreation = computed({
+  get: () => {
+    return normalizeProcessCreationFlag(form.flagProcessCreation)
+  },
+  set: (value) => {
+    form.flagProcessCreation = normalizeProcessCreationFlag(value)
+  },
+})
 
 const concurrencyPolicyIndex = computed(() => {
   const v = String(form.concurrencyPolicy || "").toLowerCase()
@@ -27,7 +43,10 @@ const btnIcon = computed(() => props.btn + " text-base font-semibold")
 const cronNextRun = ref("")
 const cronNextRunError = ref("")
 const cronNextRunPending = ref(false)
+const pulseClass = ref("")
+const savedHintVisible = ref(false)
 
+let pulseTimer = null
 let cronPreviewTimer = null
 let cronPreviewSeq = 0
 
@@ -35,6 +54,10 @@ onBeforeUnmount(() => {
   if (cronPreviewTimer) {
     clearTimeout(cronPreviewTimer)
     cronPreviewTimer = null
+  }
+  if (pulseTimer) {
+    clearTimeout(pulseTimer)
+    pulseTimer = null
   }
 })
 
@@ -101,10 +124,30 @@ watch(
   },
   { immediate: true },
 )
+
+watch(
+  () => editorPulse.value,
+  (v) => {
+    const kind = v?.kind === "success" ? "success" : v?.kind === "error" ? "error" : ""
+    if (!kind) return
+
+    if (pulseTimer) clearTimeout(pulseTimer)
+    pulseTimer = null
+
+    pulseClass.value = ""
+    savedHintVisible.value = false
+
+    requestAnimationFrame(() => {
+      pulseClass.value = kind === "success" ? "editor-pulse-success" : "editor-pulse-error"
+      if (kind === "success") savedHintVisible.value = true
+    })
+    pulseTimer = setTimeout(() => ((pulseClass.value = ""), (savedHintVisible.value = false), (pulseTimer = null)), 2200)
+  },
+)
 </script>
 
 <template>
-  <section v-if="editorVisible" class="rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.08)]">
+  <section v-if="editorVisible" class="relative rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.08)]" :class="pulseClass">
     <div class="flex items-start justify-between gap-3 px-3 pt-3 pb-2">
       <div>
         <h2>{{ $t("main.editor.title") }}</h2>
@@ -171,13 +214,53 @@ watch(
           :placeholder="$t('main.placeholders.workdir')"
         />
 
-        <label class="text-xs text-slate-500 md:pt-2.5">{{ $t("main.fields.console") }}</label>
+        <label class="text-xs text-slate-500 md:pt-2.5">{{ $t("main.fields.flags") }}</label>
         <div class="pt-1.5">
-          <label class="flex items-center gap-2.5">
-            <input class="h-5 w-5" type="checkbox" v-model="form.console" />
-            <span class="mt-0.5 text-xs text-slate-500">{{ $t("main.console.allow") }}</span>
-          </label>
-          <div class="mt-1 text-xs text-slate-500">{{ $t("main.console.allow_help") }}</div>
+          <div class="flex flex-wrap items-center gap-4">
+            <label class="flex items-center gap-2.5">
+              <input class="h-5 w-5" type="radio" name="flagProcessCreation" :value="''" v-model="flagProcessCreation" />
+              <span class="mt-0.5 text-xs text-slate-500">NONE</span>
+            </label>
+            <label class="flex items-center gap-2.5">
+              <input class="h-5 w-5" type="radio" name="flagProcessCreation" value="CREATE_NEW_CONSOLE" v-model="flagProcessCreation" />
+              <span class="mt-0.5 text-xs text-slate-500">CREATE_NEW_CONSOLE</span>
+              <span
+                class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[10px] text-slate-500 cursor-help"
+                :title="$t('main.flags.tooltip.CREATE_NEW_CONSOLE')"
+                >?</span
+              >
+            </label>
+            <label class="flex items-center gap-2.5">
+              <input class="h-5 w-5" type="radio" name="flagProcessCreation" value="CREATE_NO_WINDOW" v-model="flagProcessCreation" />
+              <span class="mt-0.5 text-xs text-slate-500">CREATE_NO_WINDOW</span>
+              <span
+                class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[10px] text-slate-500 cursor-help"
+                :title="$t('main.flags.tooltip.CREATE_NO_WINDOW')"
+                >?</span
+              >
+            </label>
+            <label class="flex items-center gap-2.5">
+              <input class="h-5 w-5" type="radio" name="flagProcessCreation" value="DETACHED_PROCESS" v-model="flagProcessCreation" />
+              <span class="mt-0.5 text-xs text-slate-500">DETACHED_PROCESS</span>
+              <span
+                class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[10px] text-slate-500 cursor-help"
+                :title="$t('main.flags.tooltip.DETACHED_PROCESS')"
+                >?</span
+              >
+            </label>
+          </div>
+        </div>
+
+        <label class="text-xs text-slate-500 md:pt-2.5">{{ $t("main.fields.timeout") }}</label>
+        <div class="flex flex-wrap items-center gap-2.5 pt-1.5">
+          <input
+            v-model.number="form.timeout"
+            type="number"
+            min="0"
+            class="w-[120px] rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
+            :placeholder="$t('main.placeholders.timeout')"
+          />
+          <span class="mt-0.5 text-xs text-slate-500">{{ $t("main.timeout_help") }}</span>
         </div>
 
         <label class="text-xs text-slate-500 md:pt-2.5">{{ $t("main.fields.concurrency_policy") }}</label>
@@ -241,5 +324,78 @@ watch(
         </button>
       </div>
     </div>
+
+    <div v-if="savedHintVisible" class="editor-saved-hint pointer-events-none absolute right-4 bottom-3 text-xs font-semibold">
+      {{ $t("toast.saved") }}
+    </div>
   </section>
 </template>
+
+<style scoped>
+ .editor-pulse-success,
+ .editor-pulse-error {
+  animation-fill-mode: both;
+  animation: editorPulseShadow 1.9s ease-out 0s 1;
+ }
+
+ .editor-pulse-success {
+  --pulse-rgb: 34, 197, 94;
+ }
+
+ .editor-pulse-error {
+  --pulse-rgb: 239, 68, 68;
+ }
+
+ @keyframes editorPulseShadow {
+  0% {
+    box-shadow:
+      0 10px 30px rgba(2, 6, 23, 0.08),
+      0 0 0 0 rgba(var(--pulse-rgb), 0),
+      0 0 0 rgba(var(--pulse-rgb), 0);
+  }
+  30% {
+    box-shadow:
+      0 10px 30px rgba(2, 6, 23, 0.08),
+      0 0 0 2px rgba(var(--pulse-rgb), 0.2),
+      0 0 28px rgba(var(--pulse-rgb), 0.28);
+  }
+  75% {
+    box-shadow:
+      0 10px 30px rgba(2, 6, 23, 0.08),
+      0 0 0 2px rgba(var(--pulse-rgb), 0.06),
+      0 0 20px rgba(var(--pulse-rgb), 0.12);
+  }
+  100% {
+    box-shadow:
+      0 10px 30px rgba(2, 6, 23, 0.08),
+      0 0 0 0 rgba(var(--pulse-rgb), 0),
+      0 0 0 rgba(var(--pulse-rgb), 0);
+  }
+ }
+
+ .editor-saved-hint {
+  color: rgb(var(--pulse-rgb, 34, 197, 94));
+  opacity: 0;
+  text-shadow: 0 1px 10px rgba(var(--pulse-rgb, 34, 197, 94), 0.25);
+  animation: editorSavedHint 1.9s ease-out 0s 1;
+ }
+
+ @keyframes editorSavedHint {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  22% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  75% {
+    opacity: 0.7;
+    transform: translateY(-1px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+ }
+</style>

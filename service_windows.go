@@ -136,16 +136,58 @@ func (h *windowsServiceHandler) Execute(args []string, r <-chan svc.ChangeReques
 	s <- svc.Status{State: svc.StartPending}
 
 	cronSvc := NewCronService()
+	quitCh := make(chan struct{}, 1)
+
+	ipcStop, ipcErr := startIPCServer(wincronControlPipeServicePath, false, func(req ipcRequest) ipcResponse {
+		switch req.Cmd {
+		case "disable":
+			if err := cronSvc.SetGlobalEnabled(false); err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			return ipcResponse{Ok: true, Message: "\u5df2\u7981\u7528 WinCron", GlobalEnabled: boolPtr(false)}
+		case "enable":
+			if err := cronSvc.SetGlobalEnabled(true); err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			return ipcResponse{Ok: true, Message: "\u5df2\u542f\u7528 WinCron", GlobalEnabled: boolPtr(true)}
+		case "status":
+			v, err := cronSvc.GetGlobalEnabled()
+			if err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			return ipcResponse{Ok: true, GlobalEnabled: boolPtr(v)}
+		case "quit":
+			select {
+			case quitCh <- struct{}{}:
+			default:
+			}
+			return ipcResponse{Ok: true, Message: "ok"}
+		case "open":
+			return ipcResponse{Ok: false, Error: "open not supported in service mode"}
+		default:
+			return ipcResponse{Ok: false, Error: "unknown command"}
+		}
+	})
+	if ipcErr != nil {
+		ipcStop = func() {}
+	}
 
 	s <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
 	for {
 		select {
+		case <-quitCh:
+			ipcStop()
+			cronSvc.scheduler.Stop()
+			s <- svc.Status{State: svc.StopPending}
+			s <- svc.Status{State: svc.Stopped}
+			return false, 0
 		case c := <-r:
 			switch c.Cmd {
 			case svc.Interrogate:
 				s <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
+				ipcStop()
 				cronSvc.scheduler.Stop()
 				s <- svc.Status{State: svc.StopPending}
 				s <- svc.Status{State: svc.Stopped}

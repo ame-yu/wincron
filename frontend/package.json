@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "@wailsio/runtime": "3.0.0-alpha.78",
+    "@wailsio/runtime": "3.0.0-alpha.79",
     "pinia": "^2.1.7",
     "tailwindcss": "^4.1.18",
     "vue": "^3.4.38",

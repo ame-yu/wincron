@@ -9,7 +9,7 @@
 - 支持设置命令参数与工作目录
 - 支持查看执行日志
 - 高级任务选项：并发策略/进程模式/多次失败禁用
-- 托盘友好：静默启动、支持开机自启、轻量模式
+- 托盘友好：支持静默启动/开机自启/轻量模式
 - 支持导入/导出
 
 ## 截图
@@ -18,6 +18,8 @@
 ![Screenshot-Settings](./docs/preview2.png)
 
 ## 安装方式
+
+> 请确保系统安装了[WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
 
 ### 下载 Release
 

@@ -2,6 +2,7 @@
 import { computed, ref } from "vue"
 import { useI18n } from "vue-i18n"
 import { useCronStore } from "../stores/cron.js"
+import ModalShell from "./ModalShell.vue"
 
 defineProps({
   btn: { type: String, required: true },
@@ -40,8 +41,7 @@ async function confirmExport() {
 <template>
   <button :class="btn" @click="show = true">{{ $t("settings.export_yaml") }}</button>
 
-  <div v-if="show" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/20 p-4" @click.self="show = false">
-    <div class="w-full max-w-[460px] rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_10px_30px_rgba(2,6,23,0.16)]">
+  <ModalShell v-model="show" :max-width="460">
       <div>
         <h3>{{ $t("settings.export_options_title") }}</h3>
         <div class="mt-0.5 text-xs text-slate-500">{{ $t("settings.export_options_subtitle") }}</div>
@@ -93,6 +93,5 @@ async function confirmExport() {
           {{ t("common.export") }}
         </button>
       </div>
-    </div>
-  </div>
+  </ModalShell>
 </template>

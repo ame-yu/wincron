@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,19 +19,84 @@ import (
 //go:embed all:frontend/dist build/windows/icon.ico
 var assets embed.FS
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func handleControlCommand(args []string, consoleEnabled bool) (handled bool, exitCode int) {
+	if len(args) == 0 {
+		return false, 0
+	}
+
+	cmd := strings.ToLower(strings.TrimSpace(args[0]))
+	switch cmd {
+	case "disable", "enable", "status", "quit", "open":
+	default:
+		return false, 0
+	}
+
+	resp, err := sendIPCRequest(ipcRequest{Cmd: cmd})
+	if err != nil {
+		if consoleEnabled {
+			if isLikelyPipeNotRunning(err) {
+				fmt.Fprintln(os.Stderr, "wincron is not running")
+			} else {
+				fmt.Fprintln(os.Stderr, err.Error())
+			}
+		}
+		return true, 2
+	}
+	if !resp.Ok {
+		if consoleEnabled {
+			msg := strings.TrimSpace(resp.Error)
+			if msg == "" {
+				msg = strings.TrimSpace(resp.Message)
+			}
+			if msg == "" {
+				msg = "request failed"
+			}
+			fmt.Fprintln(os.Stderr, msg)
+		}
+		return true, 1
+	}
+
+	if consoleEnabled {
+		if cmd == "status" {
+			if resp.GlobalEnabled != nil {
+				if *resp.GlobalEnabled {
+					fmt.Println("enabled")
+				} else {
+					fmt.Println("disabled")
+				}
+			} else if strings.TrimSpace(resp.Message) != "" {
+				fmt.Println(resp.Message)
+			}
+		} else if strings.TrimSpace(resp.Message) != "" {
+			fmt.Println(resp.Message)
+		}
+	}
+
+	return true, 0
+}
+
 func main() {
 	args := os.Args[1:]
+	filteredArgs := args
 	consoleEnabled := false
-	filteredArgs := make([]string, 0, len(args))
-	for _, a := range args {
-		if a == "--console" {
+	if len(filteredArgs) > 0 {
+		cmd := strings.ToLower(strings.TrimSpace(filteredArgs[0]))
+		switch cmd {
+		case "disable", "enable", "status", "quit", "open":
 			consoleEnabled = true
-			continue
 		}
-		filteredArgs = append(filteredArgs, a)
 	}
 	if consoleEnabled {
 		enableConsole()
+	}
+
+	handled, exitCode := handleControlCommand(filteredArgs, consoleEnabled)
+	if handled {
+		os.Exit(exitCode)
 	}
 
 	isServiceCmd := len(filteredArgs) > 0 && filteredArgs[0] == "service"
@@ -41,7 +107,31 @@ func main() {
 			log.Fatal(err)
 		}
 		if alreadyRunning {
-			if consoleEnabled {
+			if len(filteredArgs) == 0 {
+				deadline := time.Now().Add(1500 * time.Millisecond)
+				for {
+					resp, err := sendIPCRequest(ipcRequest{Cmd: "open"})
+					if err == nil {
+						if !resp.Ok && consoleEnabled {
+							msg := strings.TrimSpace(resp.Error)
+							if msg == "" {
+								msg = strings.TrimSpace(resp.Message)
+							}
+							if msg != "" {
+								fmt.Fprintln(os.Stderr, msg)
+							}
+						}
+						break
+					}
+					if time.Now().After(deadline) {
+						if consoleEnabled {
+							fmt.Println("wincron is already running")
+						}
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			} else if consoleEnabled {
 				fmt.Println("wincron is already running")
 			}
 			return
@@ -175,6 +265,46 @@ func main() {
 			mainWindow = createMainWindow()
 		}
 		return mainWindow
+	}
+
+	ipcStop, ipcErr := startIPCServer(wincronControlPipeUserPath(), false, func(req ipcRequest) ipcResponse {
+		switch req.Cmd {
+		case "disable":
+			if err := cronSvc.SetGlobalEnabled(false); err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			app.Event.Emit("globalEnabledChanged", false)
+			return ipcResponse{Ok: true, Message: "\u5df2\u7981\u7528 WinCron", GlobalEnabled: boolPtr(false)}
+		case "enable":
+			if err := cronSvc.SetGlobalEnabled(true); err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			app.Event.Emit("globalEnabledChanged", true)
+			return ipcResponse{Ok: true, Message: "\u5df2\u542f\u7528 WinCron", GlobalEnabled: boolPtr(true)}
+		case "status":
+			v, err := cronSvc.GetGlobalEnabled()
+			if err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			return ipcResponse{Ok: true, GlobalEnabled: boolPtr(v)}
+		case "open":
+			w := ensureMainWindow()
+			w.Show()
+			w.Focus()
+			app.Event.Emit("navigate", "main")
+			return ipcResponse{Ok: true, Message: "ok"}
+		case "quit":
+			quitting.Store(true)
+			app.Quit()
+			return ipcResponse{Ok: true, Message: "ok"}
+		default:
+			return ipcResponse{Ok: false, Error: "unknown command"}
+		}
+	})
+	if ipcErr == nil {
+		app.OnShutdown(func() {
+			ipcStop()
+		})
 	}
 
 	closeMainWindowForLightweight := func() {

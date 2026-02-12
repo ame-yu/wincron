@@ -2,17 +2,17 @@
 
 # wincron
 
-A lightweight task scheduler for Windows, intended to be more intuitive than the built-in Task Scheduler.
+A lightweight task scheduler for Windows. I hope it is more intuitive than the built-in Task Scheduler.
 
 ## Features
 
-- Lightweight design: low overhead when idle
-- Use cron expressions to schedule and run tasks
-- Support command arguments and working directory
+- Lightweight: single executable; low overhead when idle
+- Schedule tasks using cron expressions
+- Supports command arguments and working directory
 - View execution logs
-- Failure protection: auto-disable after N consecutive failures
-- YAML import/export for jobs (optional settings export)
-- Tray-friendly: minimize to tray, optional silent start, and auto-start on boot
+- Advanced job options: concurrency policy / process mode / disable after consecutive failures
+- Tray friendly: silent start / run on boot / lightweight mode
+- Import/export
 
 ## Screenshots
 
@@ -21,9 +21,11 @@ A lightweight task scheduler for Windows, intended to be more intuitive than the
 
 ## Installation
 
+> Make sure [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) is installed.
+
 ### Download Release
 
-- Download zip from the GitHub Releases page.
+- Download the zip from the GitHub Releases page.
 
 ### Build from Source
 
@@ -39,6 +41,5 @@ A lightweight task scheduler for Windows, intended to be more intuitive than the
 
 - Go: `1.25`
 - Wails: `v3.0.0-alpha.60`
-- Frontend runtime: `@wailsio/runtime@3.0.0-alpha.78`
 - Bun: `v1.0` or above
-- Node.js: optional if you prefer npm/pnpm over Bun
+- Node.js: optional (if you don't use Bun)

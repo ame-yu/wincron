@@ -3,11 +3,13 @@ package main
 type Job struct {
 	ID                      string   `json:"id" yaml:"id"`
 	Name                    string   `json:"name" yaml:"name"`
+	Folder                  string   `json:"folder,omitempty" yaml:"folder,omitempty"`
 	Cron                    string   `json:"cron" yaml:"cron"`
 	Command                 string   `json:"command" yaml:"command"`
 	Args                    []string `json:"args" yaml:"args"`
 	WorkDir                 string   `json:"workDir" yaml:"workDir"`
-	Console                 bool     `json:"console,omitempty" yaml:"console,omitempty"`
+	FlagProcessCreation   string   `json:"flagProcessCreation,omitempty" yaml:"flagProcessCreation,omitempty"`
+	Timeout                 int      `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	ConcurrencyPolicy       string   `json:"concurrencyPolicy,omitempty" yaml:"concurrencyPolicy,omitempty"`
 	Enabled                 bool     `json:"enabled" yaml:"enabled"`
 	MaxConsecutiveFailures  int      `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
@@ -21,7 +23,8 @@ type PreviewRunRequest struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
 	WorkDir string   `json:"workDir"`
-	Console bool `json:"console"`
+	FlagProcessCreation string `json:"flagProcessCreation,omitempty"`
+	Timeout int  `json:"timeout"`
 	JobID   string   `json:"jobId"`
 	JobName string   `json:"jobName"`
 }

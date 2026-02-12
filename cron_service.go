@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	windowsCreateNewConsole = 0x00000010
-	windowsDetachedProcess  = 0x00000008
-	windowsCreateNoWindow   = 0x08000000
+	flagCreateNewConsole = 0x00000010
+	flagDetachedProcess  = 0x00000008
+	flagCreateNoWindow   = 0x08000000
 )
 
 type CronService struct {
@@ -42,7 +42,7 @@ type runningJobInstance struct {
 	cmd *exec.Cmd
 }
 
-func applyJobConsoleMode(cmd *exec.Cmd, console bool) {
+func applyJobWindowsProcessOptions(cmd *exec.Cmd, job Job) {
 	if cmd == nil {
 		return
 	}
@@ -74,27 +74,45 @@ func applyJobConsoleMode(cmd *exec.Cmd, console bool) {
 		}
 	}
 
-	if console {
+	flag := normalizeProcessCreationFlag(job.FlagProcessCreation)
+	createNewConsole := flag == "CREATE_NEW_CONSOLE"
+	detachedProcess := flag == "DETACHED_PROCESS"
+	createNoWindow := flag == "CREATE_NO_WINDOW"
+
+	if createNewConsole {
 		setHideWindow(false)
-		updateCreationFlags(func(current uint64) uint64 {
-			current |= uint64(windowsCreateNewConsole)
-			current &^= uint64(windowsCreateNoWindow | windowsDetachedProcess)
-			return current
-		})
-	} else {
+	} else if createNoWindow {
 		setHideWindow(true)
-		updateCreationFlags(func(current uint64) uint64 {
-			current |= uint64(windowsCreateNoWindow | windowsDetachedProcess)
-			current &^= uint64(windowsCreateNewConsole)
-			return current
-		})
 	}
+	updateCreationFlags(func(current uint64) uint64 {
+		current &^= uint64(flagCreateNewConsole | flagDetachedProcess | flagCreateNoWindow)
+		if createNewConsole {
+			current |= uint64(flagCreateNewConsole)
+		}
+		if detachedProcess {
+			current |= uint64(flagDetachedProcess)
+		}
+		if createNoWindow {
+			current |= uint64(flagCreateNoWindow)
+		}
+		return current
+	})
 
 	cmd.SysProcAttr = attr
 }
 
 func renderCommandLine(command string, args []string) string {
 	return strings.Join(append([]string{command}, args...), " ")
+}
+
+func normalizeProcessCreationFlag(value string) string {
+	v := strings.ToUpper(strings.TrimSpace(value))
+	switch v {
+	case "", "CREATE_NEW_CONSOLE", "CREATE_NO_WINDOW", "DETACHED_PROCESS":
+		return v
+	default:
+		return ""
+	}
 }
 
 func normalizeConcurrencyPolicy(policy string) string {
@@ -266,9 +284,13 @@ func (s *CronService) UpsertJob(job Job) (Job, error) {
 	if job.Command == "" {
 		return Job{}, errors.New("command is required")
 	}
+	if job.Timeout < 0 {
+		job.Timeout = 0
+	}
 	if job.Name == "" {
 		job.Name = job.Command
 	}
+	job.FlagProcessCreation = normalizeProcessCreationFlag(job.FlagProcessCreation)
 
 	if _, err := s.parser.Parse(job.Cron); err != nil {
 		return Job{}, fmt.Errorf("invalid cron: %w", err)
@@ -339,6 +361,22 @@ func (s *CronService) SetJobEnabled(id string, enabled bool) (Job, error) {
 	return job, nil
 }
 
+func (s *CronService) SetJobFolder(id string, folder string) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[id]
+	if !ok {
+		return Job{}, errors.New("job not found")
+	}
+	job.Folder = strings.TrimSpace(folder)
+	s.jobs[id] = job
+	if err := s.persistLocked(); err != nil {
+		return Job{}, err
+	}
+	return job, nil
+}
+
 func (s *CronService) RunNow(id string) (JobLogEntry, error) {
 	s.mu.Lock()
 	job, ok := s.jobs[id]
@@ -383,7 +421,8 @@ func (s *CronService) RunPreview(req PreviewRunRequest) (JobLogEntry, error) {
 		Command: req.Command,
 		Args:    req.Args,
 		WorkDir: req.WorkDir,
-		Console: req.Console,
+		FlagProcessCreation: normalizeProcessCreationFlag(req.FlagProcessCreation),
+		Timeout: req.Timeout,
 		Enabled: true,
 	}
 
@@ -642,7 +681,7 @@ func (s *CronService) execute(job Job, runningInstanceID string) JobLogEntry {
 	if job.WorkDir != "" {
 		cmd.Dir = job.WorkDir
 	}
-	applyJobConsoleMode(cmd, job.Console)
+	applyJobWindowsProcessOptions(cmd, job)
 
 	if runningInstanceID != "" {
 		s.mu.Lock()
@@ -660,13 +699,33 @@ func (s *CronService) execute(job Job, runningInstanceID string) JobLogEntry {
 	cmd.Stderr = &errBuf
 
 	runErr := cmd.Start()
+	timedOut := false
 	if runErr == nil {
-		runErr = cmd.Wait()
+		if job.Timeout > 0 {
+			done := make(chan error, 1)
+			go func() {
+				done <- cmd.Wait()
+			}()
+			select {
+			case runErr = <-done:
+			case <-time.After(time.Duration(job.Timeout) * time.Second):
+				timedOut = true
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				runErr = <-done
+			}
+		} else {
+			runErr = cmd.Wait()
+		}
 	}
 
 	exitCode := 0
 	errText := ""
-	if runErr != nil {
+	if timedOut {
+		exitCode = -1
+		errText = fmt.Sprintf("timeout after %ds", job.Timeout)
+	} else if runErr != nil {
 		errText = runErr.Error()
 		exitCode = -1
 		var ee *exec.ExitError

@@ -17,6 +17,20 @@ const getLogMs = (l) => {
   return Number.isFinite(ms) ? ms : 0
 }
 
+const formatLocalTime = (raw) => {
+  const s = String(raw || "")
+  const ms = Date.parse(s)
+  return !s ? "" : Number.isFinite(ms) ? new Date(ms).toLocaleString() : s
+}
+
+const formatDuration = (l) => {
+  const startMs = Date.parse(l?.startedAt || "")
+  if (!Number.isFinite(startMs)) return ""
+  const endMs = l?.finishedAt ? Date.parse(l.finishedAt) : Date.now()
+  if (!Number.isFinite(endMs)) return ""
+  return `${Math.max(0, (endMs - startMs) / 1000).toFixed(1)}s`
+}
+
 const sortedLogs = computed(() =>
   [...(Array.isArray(logs.value) ? logs.value : [])].sort((a, b) => getLogMs(b) - getLogMs(a)),
 )
@@ -57,7 +71,10 @@ const sortedLogs = computed(() =>
         </span>
       </div>
       <div v-if="l.commandLine" class="mt-1.5 text-xs text-slate-500">{{ l.commandLine }}</div>
-      <div class="mt-1.5 text-xs text-slate-500">{{ l.startedAt }} -> {{ l.finishedAt }}</div>
+      <div class="mt-1.5 text-xs text-slate-500">
+        {{ formatLocalTime(l.startedAt) }} -> {{ formatLocalTime(l.finishedAt) }}
+        <span v-if="formatDuration(l)">({{ formatDuration(l) }})</span>
+      </div>
       <div v-if="l.error" class="mt-2.5 rounded-xl border border-red-600/25 bg-red-50 px-3 py-2.5 text-sm text-red-800">{{ l.error }}</div>
       <CollapsibleLog
         v-if="l.stdout"

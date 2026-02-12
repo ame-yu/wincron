@@ -48,7 +48,7 @@ watch(
 )
 
 function goNav() {
-  router.push({ name: nav.value.name })
+  router.push({ name: nav.value.name }).catch(() => {})
 }
 
 async function toggleGlobalEnabled(value) {
@@ -65,12 +65,29 @@ const offHandlers = []
 onMounted(async () => {
   await cron.init()
 
+  const flushDraft = () => {
+    cron.flushDraft()
+  }
+
+  const promptDraft = () => {
+    cron.promptDraftRecovery()
+  }
+
   offHandlers.push(
     Events.On("navigate", async (event) => {
+      flushDraft()
       const target = String(event?.data || "")
-      await router.push({ name: target === "Settings" ? "Settings" : "Home" })
+      await router.push({ name: target === "Settings" ? "Settings" : "Home" }).catch(() => {})
     }),
   )
+
+  ;["common:WindowClosing", "common:WindowHide", "common:WindowMinimise"].forEach((name) => {
+    offHandlers.push(Events.On(name, flushDraft))
+  })
+
+  ;["common:WindowShow", "common:WindowRestore", "common:WindowUnMinimise"].forEach((name) => {
+    offHandlers.push(Events.On(name, promptDraft))
+  })
 
   offHandlers.push(
     Events.On("globalEnabledChanged", (event) => {
@@ -86,7 +103,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative min-h-screen bg-slate-50 text-slate-900 font-sans">
+  <div class="relative h-screen overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col" >
     <Transition name="toast" appear>
       <div
         v-if="toast"
@@ -164,6 +181,8 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <router-view />
+    <div class="flex-1 min-h-0">
+      <router-view />
+    </div>
   </div>
 </template>

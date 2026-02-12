@@ -1,18 +1,25 @@
 @import "tailwindcss";
 
- .toast-enter-active,
- .toast-leave-active {
-   transition: opacity 180ms ease, transform 180ms ease;
- }
- 
- .toast-enter-from,
- .toast-leave-to {
-   opacity: 0;
-   transform: translateY(10px);
- }
- 
- .toast-enter-to,
- .toast-leave-from {
-   opacity: 1;
-   transform: translateY(0);
- }
+.toast-enter-active,
+.toast-leave-active {
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+    opacity: 0;
+    transform: translateY(10px);
+}
+
+.toast-enter-to,
+.toast-leave-from {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+body {
+    margin: 0;
+    overflow: hidden;
+    background-color: transparent;
+    transition: .3s background-color;
+}

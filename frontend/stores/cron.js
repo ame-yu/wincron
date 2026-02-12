@@ -1,4 +1,4 @@
-import { reactive, ref } from "vue"
+import { reactive, ref, watch } from "vue"
 import { defineStore } from "pinia"
 import { Call, Dialogs, Events } from "@wailsio/runtime"
 import i18n from "../i18n.js"
@@ -9,6 +9,8 @@ export const useCronStore = defineStore("cron", () => {
   const toast = ref("")
   const toastKind = ref("info")
   const toastActionLabel = ref("")
+
+  const editorPulse = ref(null)
 
   const closeBehavior = ref("tray")
 
@@ -26,18 +28,53 @@ export const useCronStore = defineStore("cron", () => {
   const form = reactive({
     id: "",
     name: "",
+    folder: "",
     cron: "0 * * * *",
     command: "",
     args: [""],
     workDir: "",
-    console: false,
+    flagProcessCreation: "",
+    timeout: 0,
     concurrencyPolicy: "skip",
     enabled: true,
     maxConsecutiveFailures: 3,
   })
 
+  let formBaseline = ""
+
+  const formDirty = ref(false)
+
+  const draftKey = "wincron.jobDraft.v3"
+  let draftSaveTimer = null
+
+  const readDraftRaw = () => {
+    try {
+      return localStorage.getItem(draftKey) || ""
+    } catch {
+      return ""
+    }
+  }
+
+  const parseDraftRaw = (raw) => {
+    if (!raw || typeof raw !== "string") {
+      return null
+    }
+    try {
+      const data = JSON.parse(raw)
+      const formData = data?.form && typeof data.form === "object" ? data.form : null
+      const baseline = typeof data?.baseline === "string" ? data.baseline : ""
+      if (!formData) {
+        return null
+      }
+      return { form: formData, baseline, ts: Number(data?.ts) || 0 }
+    } catch {
+      return null
+    }
+  }
+
   let toastTimer = null
   let toastAction = null
+  let toastOnDismiss = null
   let offJobExecuted = null
   const pendingDeleteJobs = new Map()
 
@@ -47,6 +84,57 @@ export const useCronStore = defineStore("cron", () => {
 
   function call(serviceName, methodName, ...args) {
     return Call.ByName(`${serviceName}.${methodName}`, ...args)
+  }
+
+  async function callSetJobFolder(id, folder) {
+    const updatedRaw = await callCronT(5000, "SetJobFolder", id, folder)
+    const updated = normalizeObjectResult(updatedRaw)
+    if (!updated?.id) {
+      throw new Error(t("errors.failed_to_update_job"))
+    }
+    return updated
+  }
+
+  async function setJobFolder(jobId, folder) {
+    error.value = ""
+    try {
+      const id = typeof jobId === "string" ? jobId : ""
+      if (!id) {
+        return
+      }
+      const f = typeof folder === "string" ? folder : ""
+      const updated = await callSetJobFolder(id, f)
+      await refreshJobs()
+      if (selectedJobId.value === updated.id && !isFormDirty()) {
+        loadJobToForm(updated)
+      }
+    } catch (e) {
+      error.value = String(e)
+    }
+  }
+
+  async function setJobsFolder(jobIds, folder) {
+    error.value = ""
+    try {
+      const ids = Array.isArray(jobIds) ? jobIds.map((v) => String(v || "")).filter((v) => v) : []
+      if (!ids.length) {
+        return
+      }
+      const f = typeof folder === "string" ? folder : ""
+
+      for (const id of ids) {
+        await callSetJobFolder(id, f)
+      }
+
+      await refreshJobs()
+      const sid = selectedJobId.value
+      if (sid && ids.includes(sid)) {
+        const job = Array.isArray(jobs.value) ? jobs.value.find((j) => String(j?.id || "") === sid) : null
+        if (job && !isFormDirty()) loadJobToForm(job)
+      }
+    } catch (e) {
+      error.value = String(e)
+    }
   }
 
   function callWithTimeout(serviceName, methodName, timeoutMs, ...args) {
@@ -87,11 +175,13 @@ export const useCronStore = defineStore("cron", () => {
       const savedRaw = await callCronT(5000, "UpsertJob", {
         id: "",
         name: copiedName,
+        folder: job?.folder ?? "",
         cron: job?.cron ?? "0 * * * *",
         command: job?.command ?? "",
         args,
         workDir: job?.workDir ?? "",
-        console: !!job?.console,
+        flagProcessCreation: String(job?.flagProcessCreation ?? ""),
+        timeout: Number(job?.timeout) || 0,
         concurrencyPolicy: job?.concurrencyPolicy ? String(job.concurrencyPolicy) : "skip",
         enabled: !!job?.enabled,
         maxConsecutiveFailures: Number(job?.maxConsecutiveFailures) || 3,
@@ -196,40 +286,62 @@ export const useCronStore = defineStore("cron", () => {
     })
   }
 
+  function clearToastTimer() {
+    if (!toastTimer) {
+      return
+    }
+    clearTimeout(toastTimer)
+    toastTimer = null
+  }
+
   function clearToast() {
     toast.value = ""
     toastActionLabel.value = ""
     toastAction = null
+    toastOnDismiss = null
+  }
+
+  function dismissToast() {
+    if (!toast.value) {
+      clearToastTimer()
+      return
+    }
+    const onDismiss = toastOnDismiss
+    clearToast()
+    clearToastTimer()
+    if (typeof onDismiss === "function") {
+      onDismiss()
+    }
   }
 
   function triggerToastAction() {
     const action = toastAction
+    toastOnDismiss = null
     clearToast()
-    if (toastTimer) {
-      clearTimeout(toastTimer)
-      toastTimer = null
-    }
+    clearToastTimer()
     if (typeof action === "function") {
       action()
     }
   }
 
   function showToast(message, kind = "info", options = {}) {
+    if (toast.value) {
+      dismissToast()
+    }
     toast.value = message
     toastKind.value = kind
 
     const label = typeof options?.actionLabel === "string" ? options.actionLabel : ""
     toastActionLabel.value = label
     toastAction = typeof options?.onAction === "function" ? options.onAction : null
+    toastOnDismiss = typeof options?.onDismiss === "function" ? options.onDismiss : null
 
     const durationMs = Number(options?.durationMs)
     const ms = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 3000
 
-    if (toastTimer) {
-      clearTimeout(toastTimer)
-    }
+    clearToastTimer()
     toastTimer = setTimeout(() => {
-      clearToast()
+      dismissToast()
     }, ms)
   }
 
@@ -240,6 +352,172 @@ export const useCronStore = defineStore("cron", () => {
     if (rethrow) {
       throw e
     }
+  }
+
+  function triggerEditorPulse(kind) {
+    const k = kind === "success" ? "success" : kind === "error" ? "error" : ""
+    if (!k) {
+      return
+    }
+    editorPulse.value = { kind: k, ts: Date.now() }
+  }
+
+  const getFormSnapshot = () =>
+    JSON.stringify({
+      id: String(form.id || ""),
+      name: String(form.name ?? ""),
+      folder: String(form.folder ?? ""),
+      cron: String(form.cron ?? ""),
+      command: String(form.command ?? ""),
+      args: Array.isArray(form.args) ? form.args.map((s) => String(s ?? "")).filter((s) => s !== "") : [],
+      workDir: String(form.workDir ?? ""),
+      flagProcessCreation: String(form.flagProcessCreation ?? ""),
+      timeout: Number(form.timeout) || 0,
+      concurrencyPolicy: String(form.concurrencyPolicy || "skip"),
+      enabled: !!form.enabled,
+      maxConsecutiveFailures: Number(form.maxConsecutiveFailures) || 3,
+    })
+
+  const setDirtyState = (value) => {
+    const v = !!value
+    if (formDirty.value === v) {
+      return
+    }
+    formDirty.value = v
+  }
+
+  const markFormClean = () => {
+    formBaseline = getFormSnapshot()
+    setDirtyState(false)
+  }
+
+  const isFormDirty = () => !!formDirty.value
+
+  markFormClean()
+
+  const loadDraft = () => parseDraftRaw(readDraftRaw())
+
+  const restoreDraft = () => {
+    const draft = loadDraft()
+    if (!draft) {
+      return false
+    }
+
+    try {
+      const d = draft.form
+      editorVisible.value = true
+      form.id = String(d.id || "")
+      form.name = String(d.name ?? "")
+      form.folder = String(d.folder ?? "")
+      form.cron = String(d.cron ?? "0 * * * *")
+      form.command = String(d.command ?? "")
+      form.args = Array.isArray(d.args) && d.args.length ? d.args.map((v) => String(v ?? "")) : [""]
+      form.workDir = String(d.workDir ?? "")
+      form.flagProcessCreation = String(d.flagProcessCreation ?? "")
+      form.timeout = Number(d.timeout) || 0
+      form.concurrencyPolicy = String(d.concurrencyPolicy || "skip")
+      form.enabled = !!d.enabled
+      form.maxConsecutiveFailures = Number(d.maxConsecutiveFailures) || 3
+      selectedJobId.value = String(d.id || "")
+      logs.value = []
+
+      if (typeof draft.baseline === "string") {
+        formBaseline = draft.baseline
+      }
+
+      try {
+        if (window.location.hash !== "#/") {
+          window.location.hash = "#/"
+        }
+      } catch {
+        // noop
+      }
+      clearDraft()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const promptDraftRecovery = (force = false) => {
+    const raw = readDraftRaw()
+    const draft = raw && parseDraftRaw(raw)
+    if (raw && !draft) {
+      clearDraft()
+      return false
+    }
+    if (!draft || (!force && isFormDirty())) return false
+
+    showToast(t("toast.draft_found"), "info", {
+      actionLabel: t("toast.draft_resume"),
+      onAction: restoreDraft,
+      onDismiss: () => {
+        clearDraft()
+      },
+      durationMs: 8000,
+    })
+    return true
+  }
+
+  const saveDraftNow = () => {
+    try {
+      const snapshotStr = getFormSnapshot()
+      if (snapshotStr === formBaseline) {
+        return
+      }
+      const snapshot = JSON.parse(snapshotStr)
+      localStorage.setItem(
+        draftKey,
+        JSON.stringify({
+          form: snapshot,
+          baseline: formBaseline,
+          ts: Date.now(),
+        }),
+      )
+    } catch {
+      // noop
+    }
+  }
+
+  const scheduleDraftSave = () => {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer)
+    }
+    draftSaveTimer = setTimeout(() => {
+      draftSaveTimer = null
+      saveDraftNow()
+    }, 300)
+  }
+
+  watch(
+    getFormSnapshot,
+    (snapshotStr) => {
+      const dirty = snapshotStr !== formBaseline
+      setDirtyState(dirty)
+      if (dirty) {
+        scheduleDraftSave()
+      } else if (draftSaveTimer) {
+        clearTimeout(draftSaveTimer)
+        draftSaveTimer = null
+      }
+    },
+    { immediate: true },
+  )
+
+  const clearDraft = () => {
+    try {
+      localStorage.removeItem(draftKey)
+    } catch {
+      // noop
+    }
+  }
+
+  const flushDraft = () => {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer)
+      draftSaveTimer = null
+    }
+    saveDraftNow()
   }
 
   async function updateSetting(callName, value, apply) {
@@ -358,62 +636,86 @@ export const useCronStore = defineStore("cron", () => {
   }
 
   function loadJobToForm(job) {
+    saveDraftNow()
     selectedJobId.value = job.id
     editorVisible.value = true
     form.id = job.id
     form.name = job.name ?? ""
+    form.folder = job.folder ?? ""
     form.cron = job.cron ?? "0 * * * *"
     form.command = job.command ?? ""
     form.args = Array.isArray(job.args) && job.args.length ? [...job.args] : [""]
     form.workDir = job.workDir ?? ""
-    form.console = !!job.console
+
+    form.flagProcessCreation = String(job.flagProcessCreation ?? "")
+
+    const timeout = Number(job.timeout)
+    form.timeout = Number.isFinite(timeout) && timeout > 0 ? timeout : 0
     form.concurrencyPolicy = job.concurrencyPolicy ? String(job.concurrencyPolicy) : "skip"
     form.enabled = !!job.enabled
     const mcf = Number(job.maxConsecutiveFailures)
     form.maxConsecutiveFailures = Number.isFinite(mcf) && mcf > 0 ? mcf : 3
+    markFormClean()
+    return true
   }
 
   function resetForm() {
+    saveDraftNow()
     selectedJobId.value = ""
     editorVisible.value = true
     form.id = ""
     form.name = ""
+    form.folder = ""
     form.cron = "0 * * * *"
     form.command = ""
     form.args = [""]
     form.workDir = ""
-    form.console = false
+    form.flagProcessCreation = ""
+    form.timeout = 0
     form.concurrencyPolicy = "skip"
     form.enabled = true
     form.maxConsecutiveFailures = 3
     logs.value = []
+    markFormClean()
+    return true
+  }
+
+  async function editJob(job) {
+    if (!loadJobToForm(job)) {
+      return
+    }
+    await loadLogs(job.id)
   }
 
   async function selectJob(jobId) {
     const id = typeof jobId === "string" ? jobId : ""
+
+    saveDraftNow()
     selectedJobId.value = id
     editorVisible.value = false
     if (!id) {
       logs.value = []
-      return
+      return true
     }
     await loadLogs(id)
+    return true
   }
 
   async function saveJob() {
     error.value = ""
-    showToast(t("toast.saving"), "info")
     try {
       const args = Array.isArray(form.args) ? form.args.filter((s) => s !== "") : []
 
       const savedRaw = await callCronT(5000, "UpsertJob", {
         id: form.id,
         name: form.name,
+        folder: form.folder,
         cron: form.cron,
         command: form.command,
         args,
         workDir: form.workDir,
-        console: !!form.console,
+        flagProcessCreation: String(form.flagProcessCreation ?? ""),
+        timeout: Number(form.timeout) || 0,
         concurrencyPolicy: form.concurrencyPolicy,
         enabled: form.enabled,
         maxConsecutiveFailures: Number(form.maxConsecutiveFailures) || 3,
@@ -425,11 +727,15 @@ export const useCronStore = defineStore("cron", () => {
       }
 
       await refreshJobs()
+      clearDraft()
       loadJobToForm(saved)
       await loadLogs(saved.id)
-      showToast(t("toast.saved"), "success")
+      dismissToast()
+      triggerEditorPulse("success")
     } catch (e) {
-      reportError(e)
+      error.value = String(e)
+      dismissToast()
+      triggerEditorPulse("error")
     }
   }
 
@@ -504,8 +810,37 @@ export const useCronStore = defineStore("cron", () => {
         throw new Error(t("errors.failed_to_update_job"))
       }
       await refreshJobs()
-      if (selectedJobId.value === updated.id) {
+      if (selectedJobId.value === updated.id && !isFormDirty()) {
         loadJobToForm(updated)
+      }
+    } catch (e) {
+      error.value = String(e)
+    }
+  }
+
+  async function setJobsEnabled(jobIds, enabled) {
+    error.value = ""
+    try {
+      const ids = Array.isArray(jobIds) ? jobIds.map((v) => String(v || "")).filter((v) => v) : []
+      if (!ids.length) {
+        return
+      }
+      const v = !!enabled
+      for (const id of ids) {
+        const updatedRaw = await callCronT(5000, "SetJobEnabled", id, v)
+        const updated = normalizeObjectResult(updatedRaw)
+        if (!updated?.id) {
+          throw new Error(t("errors.failed_to_update_job"))
+        }
+      }
+
+      await refreshJobs()
+      const sid = selectedJobId.value
+      if (sid && ids.includes(sid) && !isFormDirty()) {
+        const job = Array.isArray(jobs.value) ? jobs.value.find((j) => String(j?.id || "") === sid) : null
+        if (job) {
+          loadJobToForm(job)
+        }
       }
     } catch (e) {
       error.value = String(e)
@@ -515,7 +850,10 @@ export const useCronStore = defineStore("cron", () => {
   async function runNow(jobId) {
     error.value = ""
     try {
-      const entryRaw = await callCronT(60000, "RunNow", jobId)
+      const job = Array.isArray(jobs.value) ? jobs.value.find((j) => j?.id === jobId) : null
+      const jobTimeout = Number(job?.timeout)
+      const timeoutMs = Number.isFinite(jobTimeout) && jobTimeout > 0 ? jobTimeout * 1000 + 5000 : 0
+      const entryRaw = await callCronT(timeoutMs > 0 ? Math.max(60000, timeoutMs) : 0, "RunNow", jobId)
       const entry = normalizeObjectResult(entryRaw)
       if (!entry) {
         throw new Error(t("errors.failed_to_run_job"))
@@ -532,11 +870,14 @@ export const useCronStore = defineStore("cron", () => {
     error.value = ""
     try {
       const args = Array.isArray(form.args) ? form.args.filter((s) => s !== "") : []
-      const entryRaw = await callCronT(60000, "RunPreview", {
+      const previewTimeout = Number(form.timeout)
+      const timeoutMs = Number.isFinite(previewTimeout) && previewTimeout > 0 ? previewTimeout * 1000 + 5000 : 0
+      const entryRaw = await callCronT(timeoutMs > 0 ? Math.max(60000, timeoutMs) : 0, "RunPreview", {
         command: form.command,
         args,
         workDir: form.workDir,
-        console: !!form.console,
+        flagProcessCreation: String(form.flagProcessCreation ?? ""),
+        timeout: Number(form.timeout) || 0,
         jobId: form.id,
         jobName: form.name,
       })
@@ -577,6 +918,7 @@ export const useCronStore = defineStore("cron", () => {
     showToast(t("toast.clearing"), "info")
     try {
       await callCronT(5000, "ResetAll")
+      clearDraft()
       resetForm()
       logs.value = []
       await refreshJobs()
@@ -629,6 +971,7 @@ export const useCronStore = defineStore("cron", () => {
     try {
       const strategy = conflictStrategy === "overwrite" ? "overwrite" : "coexist"
       await callConfigT(5000, "ImportYAML", text, strategy)
+      clearDraft()
       resetForm()
       logs.value = []
       await refreshJobs()
@@ -666,7 +1009,7 @@ export const useCronStore = defineStore("cron", () => {
       await refreshJobs()
       if (selectedJobId.value) {
         const job = Array.isArray(jobs.value) ? jobs.value.find((j) => j?.id === selectedJobId.value) : null
-        if (job) {
+        if (job && !isFormDirty()) {
           loadJobToForm(job)
         }
       }
@@ -675,6 +1018,8 @@ export const useCronStore = defineStore("cron", () => {
         await loadLogs(selectedJobId.value)
       }
     })
+
+    promptDraftRecovery()
   }
 
   function dispose() {
@@ -682,10 +1027,7 @@ export const useCronStore = defineStore("cron", () => {
       offJobExecuted()
       offJobExecuted = null
     }
-    if (toastTimer) {
-      clearTimeout(toastTimer)
-      toastTimer = null
-    }
+    dismissToast()
     if (pendingDeleteJobs.size) {
       for (const pending of pendingDeleteJobs.values()) {
         if (pending?.timer) {
@@ -694,6 +1036,10 @@ export const useCronStore = defineStore("cron", () => {
       }
       pendingDeleteJobs.clear()
     }
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer)
+      draftSaveTimer = null
+    }
   }
 
   return {
@@ -701,6 +1047,7 @@ export const useCronStore = defineStore("cron", () => {
     toast,
     toastKind,
     toastActionLabel,
+    editorPulse,
     closeBehavior,
     silentStart,
     lightweightMode,
@@ -711,14 +1058,22 @@ export const useCronStore = defineStore("cron", () => {
     logs,
     editorVisible,
     form,
+    isFormDirty,
+    restoreDraft,
+    promptDraftRecovery,
+    flushDraft,
     refreshJobs,
     loadJobToForm,
+    editJob,
     selectJob,
     resetForm,
     saveJob,
     copyJob,
     deleteJob,
+    setJobFolder,
+    setJobsFolder,
     toggleJob,
+    setJobsEnabled,
     runNow,
     runPreviewFromForm,
     loadLogs,
