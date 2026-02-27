@@ -8,10 +8,12 @@ type Job struct {
 	Command                 string   `json:"command" yaml:"command"`
 	Args                    []string `json:"args" yaml:"args"`
 	WorkDir                 string   `json:"workDir" yaml:"workDir"`
+	Hotkey                  string   `json:"hotkey,omitempty" yaml:"hotkey,omitempty"`
 	FlagProcessCreation   string   `json:"flagProcessCreation,omitempty" yaml:"flagProcessCreation,omitempty"`
 	Timeout                 int      `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	ConcurrencyPolicy       string   `json:"concurrencyPolicy,omitempty" yaml:"concurrencyPolicy,omitempty"`
 	Enabled                 bool     `json:"enabled" yaml:"enabled"`
+	RunAtStartup            bool     `json:"runAtStartup" yaml:"runAtStartup"`
 	MaxConsecutiveFailures  int      `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
 	ConsecutiveFailures     int      `json:"consecutiveFailures" yaml:"consecutiveFailures"`
 	ExecutedCount           int      `json:"executedCount" yaml:"-"`

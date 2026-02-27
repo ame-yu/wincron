@@ -1,7 +1,9 @@
 <script setup>
-import { computed } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { storeToRefs } from "pinia"
 import { useCronStore } from "../stores/cron.js"
+import { getMenuPosition } from "../ui/menuPosition.js"
+import { formatDateTime } from "../ui/datetime.js"
 import CollapsibleLog from "./CollapsibleLog.vue"
 
 defineProps({
@@ -9,7 +11,77 @@ defineProps({
 })
 
 const cron = useCronStore()
-const { logs } = storeToRefs(cron)
+const { logs, editorVisible, jobs } = storeToRefs(cron)
+
+const contextVisible = ref(false)
+const contextLog = ref(null)
+const contextX = ref(0)
+const contextY = ref(0)
+
+function closeContextMenu() {
+  contextVisible.value = false
+  contextLog.value = null
+}
+
+function openMenuAt(e, menuHeight) {
+  const pos = getMenuPosition(e, { menuWidth: 220, menuHeight, padding: 8 })
+  contextX.value = pos.x
+  contextY.value = pos.y
+  contextVisible.value = true
+}
+
+function openContextMenu(e, log) {
+  if (!log) return
+  e?.preventDefault?.()
+  e?.stopPropagation?.()
+  contextLog.value = log
+  openMenuAt(e, editorVisible.value ? 80 : 160)
+}
+
+function findJobById(jobId) {
+  const id = String(jobId || "")
+  if (!id) return null
+  const list = Array.isArray(jobs.value) ? jobs.value : []
+  return list.find((j) => String(j?.id || "") === id) || null
+}
+
+function onContextEditJob() {
+  const entry = contextLog.value
+  if (!entry) return
+  const job = findJobById(entry.jobId)
+  if (!job) return
+  cron.editJob(job)
+  closeContextMenu()
+}
+
+function onContextShowJobLogs() {
+  const entry = contextLog.value
+  if (!entry) return
+  cron.focusLogs(String(entry.jobId || ""))
+  closeContextMenu()
+}
+
+function onContextCopyOutput() {
+  const entry = contextLog.value
+  if (!entry) return
+  cron.copyLogOutput(entry)
+  closeContextMenu()
+}
+
+function onContextDeleteRecord() {
+  const entry = contextLog.value
+  if (!entry) return
+  cron.deleteLogEntry(String(entry.id || ""))
+  closeContextMenu()
+}
+
+onMounted(() => {
+  window.addEventListener("blur", closeContextMenu)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener("blur", closeContextMenu)
+})
 
 const getLogMs = (l) => {
   const raw = l?.finishedAt || l?.startedAt || ""
@@ -17,11 +89,7 @@ const getLogMs = (l) => {
   return Number.isFinite(ms) ? ms : 0
 }
 
-const formatLocalTime = (raw) => {
-  const s = String(raw || "")
-  const ms = Date.parse(s)
-  return !s ? "" : Number.isFinite(ms) ? new Date(ms).toLocaleString() : s
-}
+const formatLocalTime = (raw) => formatDateTime(raw)
 
 const formatDuration = (l) => {
   const startMs = Date.parse(l?.startedAt || "")
@@ -37,7 +105,7 @@ const sortedLogs = computed(() =>
 </script>
 
 <template>
-  <section class="rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.08)]">
+  <section data-wincron-keep-selection="1" class="rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.08)]">
     <div class="flex items-start justify-between gap-3 px-3 pt-3 pb-2">
       <div>
         <h2>{{ $t("main.logs.title") }}</h2>
@@ -57,7 +125,7 @@ const sortedLogs = computed(() =>
     </div>
 
     <div v-if="!sortedLogs.length" class="p-2.5 text-sm text-slate-500">{{ $t("main.logs.empty") }}</div>
-    <div v-for="l in sortedLogs" :key="l.id" class="mx-3 mb-3 rounded-xl border border-slate-200 bg-white p-3">
+    <div v-for="l in sortedLogs" :key="l.id" class="mx-3 mb-3 rounded-xl border border-slate-200 bg-white p-3" @contextmenu="openContextMenu($event, l)">
       <div class="flex items-center justify-between gap-2.5">
         <div class="flex flex-wrap items-baseline gap-2.5">
           <strong>{{ l.jobName }}</strong>
@@ -93,5 +161,32 @@ const sortedLogs = computed(() =>
         button-class="text-red-700 hover:text-red-800"
       />
     </div>
+
+    <teleport to="body">
+      <div v-if="contextVisible" data-wincron-keep-selection="1" class="fixed inset-0 z-40" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu" />
+      <div
+        v-if="contextVisible"
+        data-wincron-keep-selection="1"
+        class="fixed z-50 w-[220px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.18)]"
+        :style="{ left: contextX + 'px', top: contextY + 'px' }"
+      >
+        <button v-if="!editorVisible" class="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-slate-50" @click="onContextEditJob">
+          <span>{{ $t("main.context.edit_job") }}</span>
+        </button>
+        <button v-if="!editorVisible" class="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-slate-50" @click="onContextShowJobLogs">
+          <span>{{ $t("main.context.show_job_logs") }}</span>
+        </button>
+
+        <div v-if="!editorVisible" class="h-px bg-slate-200/70" />
+
+        <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-slate-50" @click="onContextCopyOutput">
+          <span>{{ $t("main.context.copy_output") }}</span>
+        </button>
+        <div class="h-px bg-slate-200/70" />
+        <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-rose-700 hover:bg-rose-50" @click="onContextDeleteRecord">
+          <span>{{ $t("main.context.delete_records") }}</span>
+        </button>
+      </div>
+    </teleport>
   </section>
 </template>

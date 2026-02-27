@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var CONFIG_VERSION = 2
+var CONFIG_VERSION = 5
 
 type ConfigService struct {
 	cron     *CronService

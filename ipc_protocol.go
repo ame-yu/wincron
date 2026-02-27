@@ -7,6 +7,7 @@ import (
 
 type ipcRequest struct {
 	Cmd string `json:"cmd"`
+	Target string `json:"target,omitempty"`
 }
 
 type ipcResponse struct {

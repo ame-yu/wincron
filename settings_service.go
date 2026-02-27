@@ -8,28 +8,28 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"syscall"
 	"strings"
 	"sync"
-)
+	"syscall"
+	"time"
 
-const (
-	CloseBehaviorExit = "exit"
-	CloseBehaviorTray = "tray"
+	"golang.org/x/sys/windows"
 )
 
 type AppSettings struct {
-	CloseBehavior string `json:"closeBehavior" yaml:"closeBehavior"`
 	WindowWidth   int    `json:"windowWidth,omitempty" yaml:"windowWidth,omitempty"`
 	WindowHeight  int    `json:"windowHeight,omitempty" yaml:"windowHeight,omitempty"`
 	LightweightMode bool `json:"lightweightMode,omitempty" yaml:"lightweightMode,omitempty"`
 	SilentStart    bool `json:"silentStart,omitempty" yaml:"silentStart,omitempty"`
 	AutoStart      bool `json:"autoStart,omitempty" yaml:"autoStart,omitempty"`
+	RunInTray      bool `json:"runInTray" yaml:"runInTray"`
+	LastSystemBootTime string `json:"lastSystemBootTime,omitempty" yaml:"lastSystemBootTime,omitempty"`
 }
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		CloseBehavior: CloseBehaviorTray,
+		RunInTray:       true,
+		LightweightMode: true,
 	}
 }
 
@@ -45,9 +45,6 @@ func (s *settingsStore) load() (AppSettings, error) {
 	settings := defaultAppSettings()
 	if err := readJSONOrDefault(s.path, &settings, func() {}); err != nil {
 		return AppSettings{}, err
-	}
-	if settings.CloseBehavior != CloseBehaviorExit && settings.CloseBehavior != CloseBehaviorTray {
-		settings.CloseBehavior = defaultAppSettings().CloseBehavior
 	}
 	if settings.WindowWidth < 200 || settings.WindowHeight < 200 {
 		settings.WindowWidth = 0
@@ -80,6 +77,24 @@ func (s *SettingsService) GetSettings() (AppSettings, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.settings, nil
+}
+
+// updateAndPersist applies a modification to settings and persists to disk.
+// On save failure, the modification is rolled back.
+func (s *SettingsService) updateAndPersist(modify func(*AppSettings)) error {
+	s.mu.Lock()
+	prev := s.settings
+	modify(&s.settings)
+	settings := s.settings
+	s.mu.Unlock()
+
+	if err := s.store.save(settings); err != nil {
+		s.mu.Lock()
+		s.settings = prev
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func escapePowerShellSingleQuoted(s string) string {
@@ -151,9 +166,6 @@ func (s *SettingsService) applyAutoStart(enabled bool) error {
 }
 
 func (s *SettingsService) SetSettings(settings AppSettings) error {
-	if settings.CloseBehavior != CloseBehaviorExit && settings.CloseBehavior != CloseBehaviorTray {
-		settings.CloseBehavior = defaultAppSettings().CloseBehavior
-	}
 	if settings.WindowWidth < 200 || settings.WindowHeight < 200 {
 		settings.WindowWidth = 0
 		settings.WindowHeight = 0
@@ -185,40 +197,8 @@ func (s *SettingsService) SetSettings(settings AppSettings) error {
 	return nil
  }
 
-func (s *SettingsService) SetCloseBehavior(behavior string) error {
-	if behavior != CloseBehaviorExit && behavior != CloseBehaviorTray {
-		return errors.New("invalid closeBehavior")
-	}
-
-	s.mu.Lock()
-	prev := s.settings.CloseBehavior
-	s.settings.CloseBehavior = behavior
-	settings := s.settings
-	s.mu.Unlock()
-
-	if err := s.store.save(settings); err != nil {
-		s.mu.Lock()
-		s.settings.CloseBehavior = prev
-		s.mu.Unlock()
-		return err
-	}
-	return nil
-}
-
 func (s *SettingsService) SetSilentStart(enabled bool) error {
-	s.mu.Lock()
-	prev := s.settings.SilentStart
-	s.settings.SilentStart = enabled
-	settings := s.settings
-	s.mu.Unlock()
-
-	if err := s.store.save(settings); err != nil {
-		s.mu.Lock()
-		s.settings.SilentStart = prev
-		s.mu.Unlock()
-		return err
-	}
-	return nil
+	return s.updateAndPersist(func(st *AppSettings) { st.SilentStart = enabled })
 }
 
 func (s *SettingsService) SetAutoStart(enabled bool) error {
@@ -247,21 +227,17 @@ func (s *SettingsService) SetAutoStart(enabled bool) error {
 }
 
 func (s *SettingsService) SetLightweightMode(enabled bool) error {
-	s.mu.Lock()
-	prev := s.settings.LightweightMode
-	prevSilent := s.settings.SilentStart
-	s.settings.LightweightMode = enabled
-	settings := s.settings
-	s.mu.Unlock()
+	return s.updateAndPersist(func(st *AppSettings) { st.LightweightMode = enabled })
+}
 
-	if err := s.store.save(settings); err != nil {
-		s.mu.Lock()
-		s.settings.LightweightMode = prev
-		s.settings.SilentStart = prevSilent
-		s.mu.Unlock()
-		return err
-	}
-	return nil
+func (s *SettingsService) SetRunInTray(enabled bool) error {
+	return s.updateAndPersist(func(st *AppSettings) { st.RunInTray = enabled })
+}
+
+func (s *SettingsService) getRunInTray() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.settings.RunInTray
 }
 
 func (s *SettingsService) getLightweightMode() bool {
@@ -282,15 +258,6 @@ func (s *SettingsService) getAutoStart() bool {
 	return s.settings.AutoStart
 }
 
-func (s *SettingsService) getCloseBehavior() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.settings.CloseBehavior != CloseBehaviorExit && s.settings.CloseBehavior != CloseBehaviorTray {
-		return defaultAppSettings().CloseBehavior
-	}
-	return s.settings.CloseBehavior
-}
-
 func (s *SettingsService) getWindowSize() (width int, height int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -304,23 +271,10 @@ func (s *SettingsService) setWindowSize(width int, height int) error {
 	if width < 200 || height < 200 {
 		return nil
 	}
-
-	s.mu.Lock()
-	prevW := s.settings.WindowWidth
-	prevH := s.settings.WindowHeight
-	s.settings.WindowWidth = width
-	s.settings.WindowHeight = height
-	settings := s.settings
-	s.mu.Unlock()
-
-	if err := s.store.save(settings); err != nil {
-		s.mu.Lock()
-		s.settings.WindowWidth = prevW
-		s.settings.WindowHeight = prevH
-		s.mu.Unlock()
-		return err
-	}
-	return nil
+	return s.updateAndPersist(func(st *AppSettings) {
+		st.WindowWidth = width
+		st.WindowHeight = height
+	})
 }
 
 func (s *SettingsService) OpenDataDir() (string, error) {
@@ -356,4 +310,32 @@ func (s *SettingsService) OpenEnvironmentVariables() error {
 		return err
 	}
 	return nil
+}
+
+// GetSystemBootTime returns the Windows system boot time as a formatted string
+func GetSystemBootTime() string {
+	// Use golang.org/x/sys/windows helper function
+	uptime := windows.DurationSinceBoot()
+	// Calculate boot time
+	bootTime := time.Now().Add(-uptime)
+	return bootTime.UTC().Format(time.RFC3339)
+}
+
+// GetLastSystemBootTime returns the stored last system boot time
+func (s *SettingsService) GetLastSystemBootTime() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.settings.LastSystemBootTime
+}
+
+// SetLastSystemBootTime updates the stored last system boot time
+func (s *SettingsService) SetLastSystemBootTime(bootTime string) error {
+	return s.updateAndPersist(func(st *AppSettings) { st.LastSystemBootTime = bootTime })
+}
+
+// IsSystemRebooted checks if system has been rebooted since last run
+func (s *SettingsService) IsSystemRebooted() bool {
+	currentBootTime := GetSystemBootTime()
+	lastBootTime := s.GetLastSystemBootTime()
+	return currentBootTime != lastBootTime
 }

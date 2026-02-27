@@ -7,15 +7,17 @@
 - 轻量设计：单可执行文件；空闲时低开销
 - 使用 cron 表达式定时执行任务
 - 支持设置命令参数与工作目录
-- 支持查看执行日志
-- 高级任务选项：并发策略/进程模式/多次失败禁用
-- 托盘友好：支持静默启动/开机自启/轻量模式
+- 记录执行日志
+- 高级任务选项：并发策略/多次失败禁用
+- 静默启动/开机自启/轻量模式/托盘模式
+- 支持设置全局快捷键
 - 支持导入/导出
+- 支持IPC命令行
 
 ## 截图
 
-![Screenshot1-HomePage](./docs/preview1.png)
-![Screenshot-Settings](./docs/preview2.png)
+![HomePage](./docs/preview1.png)
+![Settings](./docs/preview2.png)
 
 ## 安装方式
 
@@ -38,6 +40,6 @@
 ## 开发环境
 
 - Go：`1.25`
-- Wails：`v3.0.0-alpha.60`
+- Wails：`v3.0.0-alpha.71`
 - Bun：`v1.0`或以上
 - Node.js：可选（如果你不使用 Bun）

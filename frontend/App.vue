@@ -62,8 +62,25 @@ async function toggleGlobalEnabled(value) {
 
 const offHandlers = []
 
+function resolveClickElement(target) {
+  if (!target) return null
+  if (target instanceof Element) return target
+  return target?.parentElement || null
+}
+
+function onDocumentClickCapture(e) {
+  const el = resolveClickElement(e?.target)
+  if (!el) return
+  if (el.closest?.('[data-wincron-keep-selection="1"]')) {
+    return
+  }
+  window.dispatchEvent(new CustomEvent("wincron:clear-selection"))
+}
+
 onMounted(async () => {
   await cron.init()
+
+  document.addEventListener("click", onDocumentClickCapture, true)
 
   const flushDraft = () => {
     cron.flushDraft()
@@ -97,6 +114,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener("click", onDocumentClickCapture, true)
   offHandlers.splice(0).forEach((off) => off?.())
   cron.dispose()
 })
@@ -107,6 +125,7 @@ onUnmounted(() => {
     <Transition name="toast" appear>
       <div
         v-if="toast"
+        data-wincron-keep-selection="1"
         class="fixed right-3 bottom-3 z-[9999] max-w-[380px] rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.08)] data-[kind=success]:border-green-600/25 data-[kind=success]:bg-green-50 data-[kind=danger]:border-red-600/25 data-[kind=danger]:bg-red-50 sm:right-4 sm:bottom-4"
         :data-kind="toastKind"
       >
@@ -146,7 +165,7 @@ onUnmounted(() => {
                 :class="globalEnabled ? 'text-white' : 'text-slate-500'"
                 @click="toggleGlobalEnabled(true)"
               >
-                {{ $t("global.enable_wincorn") }}
+                {{ $t("global.enable_wincron") }}
               </button>
               <button
                 type="button"
@@ -154,7 +173,7 @@ onUnmounted(() => {
                 :class="globalEnabled ? 'text-slate-500' : 'text-white'"
                 @click="toggleGlobalEnabled(false)"
               >
-                {{ $t("global.disable_wincorn") }}
+                {{ $t("global.disable_wincron") }}
               </button>
             </div>
           </div>

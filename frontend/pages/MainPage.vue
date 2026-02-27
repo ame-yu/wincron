@@ -1,5 +1,6 @@
 <script setup>
 import { onBeforeUnmount, onMounted } from "vue"
+import { storeToRefs } from "pinia"
 import { useCronStore } from "../stores/cron.js"
 import { btn, btnDanger, btnPrimary } from "../ui/buttonClasses.js"
 import JobListPanel from "../components/JobListPanel.vue"
@@ -8,6 +9,7 @@ import LogsPanel from "../components/LogsPanel.vue"
 import AppScrollbar from "../components/AppScrollbar.vue"
 
 const cron = useCronStore()
+const { editorVisible } = storeToRefs(cron)
 
 const onGlobalKeydown = (e) => {
   if (e?.repeat) {
@@ -42,8 +44,8 @@ onBeforeUnmount(() => {
   <div class="mx-auto flex flex-1 h-full max-w-[1240px] flex-col gap-4 p-3 sm:p-5 lg:flex-row lg:items-stretch min-h-0">
     <JobListPanel :btn="btn" :btn-primary="btnPrimary" :btn-danger="btnDanger" />
 
-    <AppScrollbar root-class="min-w-0 min-h-0 flex flex-1" view-class="flex flex-col gap-4 p-2.5">
-      <JobEditorPanel :btn="btn" :btn-primary="btnPrimary" />
+    <AppScrollbar root-class="min-w-0 min-h-0 flex flex-1" view-class="flex flex-col gap-4">
+      <JobEditorPanel v-if="editorVisible" :btn="btn" :btn-primary="btnPrimary" />
       <LogsPanel :btn-danger="btnDanger" />
     </AppScrollbar>
   </div>

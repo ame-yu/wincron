@@ -1,23 +1,25 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { storeToRefs } from "pinia"
 import { useI18n } from "vue-i18n"
 import { useCronStore } from "../stores/cron.js"
 import { useDialogs } from "../composables/useDialogs.js"
 import { useDragTransfer } from "../composables/useDragTransfer.js"
+import { getMenuPosition } from "../ui/menuPosition.js"
+import { formatDateTime } from "../ui/datetime.js"
 import AppScrollbar from "./AppScrollbar.vue"
 import SplitMenuButton from "./SplitMenuButton.vue"
 import JobCardItem from "./JobCardItem.vue"
 import ModalShell from "./ModalShell.vue"
 
-defineProps({
+const props = defineProps({
   btn: { type: String, required: true },
   btnPrimary: { type: String, required: true },
   btnDanger: { type: String, required: true },
 })
 
 const cron = useCronStore()
-const { jobs, selectedJobId } = storeToRefs(cron)
+const { jobs, jobsLoaded, selectedJobId } = storeToRefs(cron)
 
 const { t } = useI18n()
 
@@ -27,6 +29,19 @@ const contextKind = ref("job")
 const contextFolder = ref("")
 const contextX = ref(0)
 const contextY = ref(0)
+
+const hotkeyDialogVisible = ref(false)
+const hotkeyDialogJob = ref(null)
+const hotkeyDialogValue = ref("")
+const hotkeyInputRef = ref(null)
+
+const hotkeyDialogValueTrimmed = computed(() => String(hotkeyDialogValue.value || "").trim())
+const isHotkeyWaiting = computed(() => hotkeyDialogVisible.value && !hotkeyDialogValueTrimmed.value)
+
+function focusHotkeyInput() {
+  hotkeyInputRef.value?.focus?.()
+  requestAnimationFrame(() => hotkeyInputRef.value?.focus?.())
+}
 
 function normalizeFolderName(v) {
   return String(v || "").trim()
@@ -38,6 +53,28 @@ function readLocalStorageJson(key, fallback) {
     return raw ? JSON.parse(raw) : fallback
   } catch {
     return fallback
+  }
+}
+
+function removeJobsFromRootOrder(jobIds) {
+  const ids = Array.isArray(jobIds) ? jobIds.map((v) => String(v || "")).filter((v) => v) : []
+  if (!ids.length) return
+
+  const current = normalizeStringList(rootOrder.value)
+  const remove = new Set(ids.map((id) => `job:${id}`))
+  if (![...remove].some((t) => current.includes(t))) return
+  persistRootOrder(current.filter((t) => !remove.has(t)))
+}
+
+function ensureJobsInRootOrder(jobIds) {
+  const ids = Array.isArray(jobIds) ? jobIds.map((v) => String(v || "")).filter((v) => v) : []
+  if (!ids.length) return
+
+  const current = normalizeStringList(rootOrder.value)
+  const add = ids.map((id) => `job:${id}`)
+  const next = normalizeStringList([...current, ...add])
+  if (next.length !== current.length || next.some((t, i) => t !== current[i])) {
+    persistRootOrder(next)
   }
 }
 
@@ -60,7 +97,79 @@ function normalizeStringList(list) {
   return out
 }
 
-const { clearDragState, getDragJobId, getDragFolderName, onFolderDragStart, onDragStart } = useDragTransfer({ normalizeFolderName })
+const selectedTokens = ref([])
+
+function tokenForJob(jobId) {
+  const id = String(jobId || "")
+  return id ? `job:${id}` : ""
+}
+
+function tokenForFolder(folderName) {
+  const name = normalizeFolderName(folderName)
+  return name ? `folder:${name}` : ""
+}
+
+function setSelectedTokens(next) {
+  selectedTokens.value = normalizeStringList(next)
+}
+
+function isTokenSelected(token) {
+  return !!token && selectedTokens.value.includes(token)
+}
+
+function toggleTokenSelected(token) {
+  if (!token) return
+  const current = selectedTokens.value
+  if (current.includes(token)) {
+    setSelectedTokens(current.filter((t) => t !== token))
+    return
+  }
+  setSelectedTokens([...current, token])
+}
+
+function isJobSelected(jobId) {
+  return isTokenSelected(tokenForJob(jobId))
+}
+
+function isFolderSelected(folderName) {
+  return isTokenSelected(tokenForFolder(folderName))
+}
+
+const { clearDragState, getDragJobId, getDragFolderName, onFolderDragStart, onDragStart: baseOnDragStart } = useDragTransfer({ normalizeFolderName })
+
+function getDragJobIds(e) {
+  const dt = e?.dataTransfer
+  if (dt) {
+    const types = Array.isArray(dt.types) ? dt.types : Array.from(dt.types || [])
+    if (types.includes("application/x-wincron-jobs")) {
+      try {
+        const raw = dt.getData("application/x-wincron-jobs")
+        const parsed = raw ? JSON.parse(raw) : []
+        const ids = Array.isArray(parsed) ? parsed.map((v) => String(v || "")).filter((v) => v) : []
+        if (ids.length) return normalizeStringList(ids)
+      } catch {}
+    }
+  }
+
+  const single = getDragJobId(e)
+  return single ? [single] : []
+}
+
+function onJobDragStart(e, jobId) {
+  const id = typeof jobId === "string" ? jobId : ""
+  if (!id) return
+
+  const token = tokenForJob(id)
+  const multi = isTokenSelected(token) && selectedTokens.value.length > 1
+  const ids = multi ? getSelectedJobIdsExpanded() : [id]
+
+  baseOnDragStart(e, id)
+  if (e?.dataTransfer) {
+    try {
+      e.dataTransfer.setData("application/x-wincron-jobs", JSON.stringify(ids))
+    } catch {}
+  }
+}
 
 const jobOrderStorageKey = "wincron.jobOrder"
 const storedJobOrder = normalizeStringList(readLocalStorageJson(jobOrderStorageKey, []))
@@ -77,10 +186,6 @@ const storedRootOrder = normalizeStringList(readLocalStorageJson(rootOrderStorag
 
 const rootOrder = ref(storedRootOrder)
 
-function normalizeRootOrder(list) {
-  return normalizeStringList(list)
-}
-
 function persistRootOrder(next) {
   rootOrder.value = next
   writeLocalStorageJson(rootOrderStorageKey, next)
@@ -94,6 +199,19 @@ const storedFolders = (() => {
 
 const folders = ref(storedFolders)
 const folderOpen = ref({})
+
+function clearJobsStorageCache() {
+  jobOrder.value = []
+  rootOrder.value = []
+  folders.value = []
+  folderOpen.value = {}
+  setSelectedTokens([])
+  ;[jobOrderStorageKey, rootOrderStorageKey, folderStorageKey].forEach((key) => {
+    try {
+      localStorage.removeItem(key)
+    } catch {}
+  })
+}
 
 const {
   textDialogVisible,
@@ -111,20 +229,20 @@ const {
   closeConfirmDialog,
 } = useDialogs()
 
-function normalizeJobOrder(ids) {
-  return normalizeStringList(ids)
-}
-
 watch(
   jobs,
   (list) => {
     const jobList = Array.isArray(list) ? list : []
     if (!jobList.length) {
+      if (!jobsLoaded.value) {
+        return
+      }
+      clearJobsStorageCache()
       return
     }
     const allIds = new Set(jobList.map((j) => String(j?.id || "")).filter((id) => id))
 
-    const current = normalizeJobOrder(jobOrder.value)
+    const current = normalizeStringList(jobOrder.value)
     const kept = current.filter((id) => allIds.has(id))
 
     const missing = jobList
@@ -162,6 +280,17 @@ function toggleFolder(name) {
   folderOpen.value = { ...folderOpen.value, [name]: !isFolderOpen(name) }
 }
 
+function onFolderClick(e, folderName) {
+  if (e && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault()
+    e.stopPropagation()
+    toggleTokenSelected(tokenForFolder(folderName))
+    focusLogsFromSelection()
+    return
+  }
+  toggleFolder(folderName)
+}
+
 async function createFolder() {
   const raw = await openTextDialog({
     title: t("main.folders.new_folder"),
@@ -175,16 +304,23 @@ async function createFolder() {
 
 onMounted(() => {
   window.addEventListener("wincron:new-folder", createFolder)
+  window.addEventListener("wincron:clear-selection", clearSelection)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener("wincron:new-folder", createFolder)
+  window.removeEventListener("wincron:clear-selection", clearSelection)
 })
 
 const createMenuItems = computed(() => [
   { key: "job", label: t("main.folders.new_job"), default: true },
   { key: "folder", label: t("main.folders.new_folder") },
 ])
+
+function clearSelection() {
+  setSelectedTokens([])
+  cron.selectJob("")
+}
 
 function onCreateSelect(key) {
   if (key === "folder") {
@@ -196,7 +332,7 @@ function onCreateSelect(key) {
 
 const sortedJobs = computed(() => {
   const list = Array.isArray(jobs.value) ? [...jobs.value] : []
-  const order = normalizeJobOrder(jobOrder.value)
+  const order = normalizeStringList(jobOrder.value)
   const index = new Map(order.map((id, i) => [id, i]))
   list.sort((a, b) => {
     const ai = index.get(String(a?.id || ""))
@@ -255,7 +391,7 @@ watch(
     }
 
     const jobList = Array.isArray(jobs.value) ? jobs.value : []
-    const current = normalizeRootOrder(rootOrder.value)
+    const current = normalizeStringList(rootOrder.value)
     if (!jobList.length && current.some((t) => t.startsWith("job:"))) {
       return
     }
@@ -285,7 +421,7 @@ const displayItems = computed(() => {
   const folderMap = new Map(folderItems.value.map((it) => [normalizeFolderName(it.name), it]))
   const jobMap = new Map(jobItems.map((it) => [String(it.job?.id || ""), it]))
 
-  const tokens = normalizeRootOrder(rootOrder.value)
+  const tokens = normalizeStringList(rootOrder.value)
   const out = []
   for (const token of tokens) {
     if (token.startsWith("folder:")) {
@@ -314,6 +450,62 @@ const displayItems = computed(() => {
   return out
 })
 
+watch(
+  [jobs, folderNames],
+  ([jobList, foldersList]) => {
+    const ids = new Set((Array.isArray(jobList) ? jobList : []).map((j) => String(j?.id || "")).filter((id) => id))
+    const foldersSet = new Set((Array.isArray(foldersList) ? foldersList : []).map((n) => normalizeFolderName(n)).filter((n) => n))
+
+    const next = selectedTokens.value.filter((t) => {
+      if (t.startsWith("job:")) return ids.has(t.slice("job:".length))
+      if (t.startsWith("folder:")) return foldersSet.has(normalizeFolderName(t.slice("folder:".length)))
+      return false
+    })
+
+    if (next.length !== selectedTokens.value.length || next.some((t, i) => t !== selectedTokens.value[i])) {
+      setSelectedTokens(next)
+    }
+  },
+  { immediate: true },
+)
+
+function focusLogsFromSelection() {
+  const lastJob = [...selectedTokens.value].reverse().find((t) => t.startsWith("job:"))
+  cron.focusLogs(lastJob ? lastJob.slice("job:".length) : "")
+}
+
+function onJobSelect(e, jobId) {
+  const token = tokenForJob(jobId)
+  if (!token) return
+  if (e && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault()
+    e.stopPropagation()
+    toggleTokenSelected(token)
+    focusLogsFromSelection()
+    return
+  }
+  setSelectedTokens([token])
+  cron.selectJob(String(jobId || ""))
+}
+
+async function selectSingleJob(jobId) {
+  const token = tokenForJob(jobId)
+  if (!token) return false
+  setSelectedTokens([token])
+  await cron.selectJob(String(jobId || ""))
+  return true
+}
+
+async function withSingleSelection(job, fn) {
+  if (!job) return
+  await selectSingleJob(job.id)
+  await fn(job)
+}
+
+const onJobActionEdit = (job) => withSingleSelection(job, cron.editJob)
+const onJobActionToggle = (job) => withSingleSelection(job, cron.toggleJob)
+const onJobActionRun = (job) => withSingleSelection(job, (j) => cron.runNow(j.id))
+
 async function onDropToFolderCardBlank(e, folderName) {
   const draggedFolder = getDragFolderName(e)
   if (draggedFolder) {
@@ -331,16 +523,12 @@ async function onDropToFolder(e, folderName) {
     clearDragState()
     return
   }
-  const id = getDragJobId(e)
-  if (!id) return
+  const ids = getDragJobIds(e)
+  if (!ids.length) return
   const f = ensureFolder(folderName)
-  await cron.setJobFolder(id, f)
+  await cron.setJobsFolder(ids, f)
   folderOpen.value = { ...folderOpen.value, [folderName]: true }
-  const current = normalizeRootOrder(rootOrder.value)
-  const token = `job:${id}`
-  if (current.includes(token)) {
-    persistRootOrder(current.filter((t) => t !== token))
-  }
+  removeJobsFromRootOrder(ids)
   clearDragState()
 }
 
@@ -354,7 +542,7 @@ function onDropToFolderOrder(e, folderName) {
 
   const dragToken = `folder:${normalizeFolderName(dragged)}`
   const targetToken = `folder:${normalizeFolderName(target)}`
-  const base = normalizeRootOrder(rootOrder.value)
+  const base = normalizeStringList(rootOrder.value)
   const ensured = base.slice()
   if (!ensured.includes(dragToken)) ensured.push(dragToken)
   if (!ensured.includes(targetToken)) ensured.push(targetToken)
@@ -369,20 +557,17 @@ function onDropToFolderOrder(e, folderName) {
 }
 
 async function onDropToUnfiled(e) {
-  const id = getDragJobId(e)
-  if (!id) return
-  await cron.setJobFolder(id, "")
-  const current = normalizeRootOrder(rootOrder.value)
-  const token = `job:${id}`
-  if (!current.includes(token)) {
-    persistRootOrder([...current, token])
-  }
+  const ids = getDragJobIds(e)
+  if (!ids.length) return
+  await cron.setJobsFolder(ids, "")
+  ensureJobsInRootOrder(ids)
   clearDragState()
 }
 
 async function onDropToJob(e, targetJobId) {
   const draggedFolderName = getDragFolderName(e)
-  const draggedId = getDragJobId(e)
+  const draggedIds = getDragJobIds(e)
+  const draggedId = draggedIds.length === 1 ? draggedIds[0] : ""
   const targetId = typeof targetJobId === "string" ? targetJobId : ""
 
   if (draggedFolderName) {
@@ -394,7 +579,7 @@ async function onDropToJob(e, targetJobId) {
 
     const dragToken = `folder:${normalizeFolderName(draggedFolderName)}`
     const targetToken = `job:${targetId}`
-    const base = normalizeRootOrder(rootOrder.value)
+    const base = normalizeStringList(rootOrder.value)
     const dragIndex = base.indexOf(dragToken)
     const targetIndex = base.indexOf(targetToken)
     if (dragIndex >= 0 && targetIndex >= 0 && dragToken !== targetToken) {
@@ -404,6 +589,24 @@ async function onDropToJob(e, targetJobId) {
       const at = insertBelow ? targetIndexWithout + 1 : targetIndexWithout
       persistRootOrder([...without.slice(0, at), dragToken, ...without.slice(at)])
     }
+    clearDragState()
+    return
+  }
+
+  if (draggedIds.length > 1) {
+    if (!targetId) return
+    const jobList = Array.isArray(jobs.value) ? jobs.value : []
+    const target = jobList.find((j) => String(j?.id || "") === targetId)
+    if (!target) return
+
+    const targetFolder = normalizeFolderName(target?.folder)
+    await cron.setJobsFolder(draggedIds, targetFolder)
+    if (targetFolder) {
+      removeJobsFromRootOrder(draggedIds)
+    } else {
+      ensureJobsInRootOrder(draggedIds)
+    }
+
     clearDragState()
     return
   }
@@ -421,7 +624,7 @@ async function onDropToJob(e, targetJobId) {
     await cron.setJobFolder(draggedId, targetFolder)
   }
 
-  const baseOrder = normalizeJobOrder(jobOrder.value)
+  const baseOrder = normalizeStringList(jobOrder.value)
 
   const draggedIndex = baseOrder.indexOf(draggedId)
   const targetIndex = baseOrder.indexOf(targetId)
@@ -434,7 +637,7 @@ async function onDropToJob(e, targetJobId) {
 
   let insertBelow = draggedIndex >= 0 && targetIndex >= 0 ? draggedIndex < targetIndex : true
   if (!targetFolder) {
-    const base = normalizeRootOrder(rootOrder.value)
+    const base = normalizeStringList(rootOrder.value)
     const dragToken = `job:${draggedId}`
     const targetToken = `job:${targetId}`
     const di = base.indexOf(dragToken)
@@ -444,10 +647,10 @@ async function onDropToJob(e, targetJobId) {
     }
   }
   const at = insertBelow ? targetIndexWithout + 1 : targetIndexWithout
-  const next = normalizeJobOrder([...without.slice(0, at), draggedId, ...without.slice(at)])
+  const next = normalizeStringList([...without.slice(0, at), draggedId, ...without.slice(at)])
 
   persistJobOrder(next)
-  const current = normalizeRootOrder(rootOrder.value)
+  const current = normalizeStringList(rootOrder.value)
   const dragToken = `job:${draggedId}`
   const targetToken = `job:${targetId}`
 
@@ -472,22 +675,38 @@ async function onDropToJob(e, targetJobId) {
   clearDragState()
 }
 
-const folderCardClass = "rounded-xl border border-slate-200 bg-white p-3"
+const folderCardClass = "rounded-xl border border-slate-200 bg-white p-3 data-[selected=true]:border-blue-600/45 data-[selected=true]:ring-4 data-[selected=true]:ring-blue-600/10"
 
 const formatJobNextRun = (job) => {
-  const raw = String(job?.nextRunAt || "")
-  if (!raw) {
-    return ""
-  }
-  const ms = Date.parse(raw)
-  if (!Number.isFinite(ms)) {
-    return raw
-  }
-  return new Date(ms).toLocaleString()
+  return formatDateTime(job?.nextRunAt)
 }
 
 function editJob(job) {
   cron.editJob(job)
+}
+
+function jobCardProps(job, inFolder) {
+  return {
+    job,
+    selected: isJobSelected(job?.id),
+    inFolder,
+    btn: props.btn,
+    btnPrimary: props.btnPrimary,
+    btnDanger: props.btnDanger,
+    formatNextRun: formatJobNextRun,
+  }
+}
+
+const jobCardListeners = {
+  dragstart: onJobDragStart,
+  dragend: clearDragState,
+  drop: onDropToJob,
+  select: onJobSelect,
+  edit: onJobActionEdit,
+  toggle: onJobActionToggle,
+  run: onJobActionRun,
+  delete: cron.deleteJob,
+  contextmenu: openContextMenu,
 }
 
 function getFolderJobIds(name) {
@@ -535,16 +754,19 @@ async function deleteFolder(name) {
   if (!f) {
     return
   }
-  const ok = await openConfirmDialog({
-    title: t("main.folders.delete_folder"),
-    message: t("main.folders.delete_confirm", { name: f }),
-    danger: true,
-  })
-  if (!ok) {
-    return
-  }
 
   const ids = getFolderJobIds(f)
+
+  if (ids.length > 0) {
+    const ok = await openConfirmDialog({
+      title: t("main.folders.delete_folder"),
+      message: t("main.folders.delete_confirm", { name: f }),
+      danger: true,
+    })
+    if (!ok) {
+      return
+    }
+  }
 
   const list = Array.isArray(folders.value) ? folders.value : []
   persistFolders(list.filter((n) => normalizeFolderName(n) !== f))
@@ -553,7 +775,9 @@ async function deleteFolder(name) {
   delete nextOpen[f]
   folderOpen.value = nextOpen
 
-  await cron.setJobsFolder(ids, "")
+  if (ids.length > 0) {
+    await cron.setJobsFolder(ids, "")
+  }
 }
 
 function closeContextMenu() {
@@ -564,24 +788,80 @@ function closeContextMenu() {
 }
 
 function openMenuAt(e, menuHeight) {
-  const menuWidth = 220
-  const padding = 8
-
-  const maxX = Math.max(padding, window.innerWidth - menuWidth - padding)
-  const maxY = Math.max(padding, window.innerHeight - menuHeight - padding)
-
-  contextX.value = Math.min(Math.max(padding, e.clientX), maxX)
-  contextY.value = Math.min(Math.max(padding, e.clientY), maxY)
+  const pos = getMenuPosition(e, { menuWidth: 220, menuHeight, padding: 8 })
+  contextX.value = pos.x
+  contextY.value = pos.y
   contextVisible.value = true
+}
+
+const isBulkContext = computed(() => selectedTokens.value.length > 1)
+
+function getSelectedFolderNames() {
+  return selectedTokens.value
+    .filter((t) => t.startsWith("folder:"))
+    .map((t) => normalizeFolderName(t.slice("folder:".length)))
+    .filter((n) => n)
+}
+
+function getSelectedDirectJobIds() {
+  return selectedTokens.value
+    .filter((t) => t.startsWith("job:"))
+    .map((t) => String(t.slice("job:".length) || ""))
+    .filter((id) => id)
+}
+
+function getSelectedJobIdsExpanded() {
+  const out = new Set(getSelectedDirectJobIds())
+  for (const name of getSelectedFolderNames()) {
+    for (const id of getFolderJobIds(name)) {
+      out.add(id)
+    }
+  }
+  return [...out]
+}
+
+async function onContextEnableSelected() {
+  const ids = getSelectedJobIdsExpanded()
+  closeContextMenu()
+  await cron.setJobsEnabled(ids, true)
+}
+
+async function onContextDisableSelected() {
+  const ids = getSelectedJobIdsExpanded()
+  closeContextMenu()
+  await cron.setJobsEnabled(ids, false)
+}
+
+async function onContextDeleteSelected() {
+  const jobIds = getSelectedDirectJobIds()
+  const foldersToDelete = getSelectedFolderNames()
+  closeContextMenu()
+
+  setSelectedTokens([])
+  for (const id of jobIds) {
+    cron.deleteJob(id)
+  }
+  for (const name of foldersToDelete) {
+    await deleteFolder(name)
+  }
 }
 
 function openContextMenu(e, job) {
   contextKind.value = "job"
   contextFolder.value = ""
-  selectedJobId.value = job.id
-  contextJob.value = job
+  const token = tokenForJob(job?.id)
 
-  openMenuAt(e, 200)
+  if (e && (e.ctrlKey || e.metaKey)) {
+    toggleTokenSelected(token)
+  } else {
+    if (!isTokenSelected(token)) {
+      setSelectedTokens([token])
+    }
+  }
+
+  contextJob.value = job
+  focusLogsFromSelection()
+  openMenuAt(e, isBulkContext.value ? 160 : 240)
 }
 
 function openFolderContextMenu(e, folderName) {
@@ -592,7 +872,17 @@ function openFolderContextMenu(e, folderName) {
   contextFolder.value = f
   contextJob.value = null
 
-  openMenuAt(e, 200)
+  const token = tokenForFolder(f)
+  if (e && (e.ctrlKey || e.metaKey)) {
+    toggleTokenSelected(token)
+  } else {
+    if (!isTokenSelected(token)) {
+      setSelectedTokens([token])
+    }
+  }
+
+  focusLogsFromSelection()
+  openMenuAt(e, isBulkContext.value ? 160 : 200)
 }
 
 function onContextEdit() {
@@ -611,6 +901,115 @@ function onContextCopy() {
   if (!contextJob.value) return
   cron.copyJob(contextJob.value)
   closeContextMenu()
+}
+
+async function onContextBindHotkey() {
+  if (!contextJob.value) return
+  const job = contextJob.value
+  const existingHotkey = String(job?.hotkey || "")
+  const shouldAutoRecord = !existingHotkey.trim()
+  hotkeyDialogJob.value = job
+  hotkeyDialogValue.value = existingHotkey
+  closeContextMenu()
+  await cron.pauseHotkeys()
+  hotkeyDialogVisible.value = true
+  await nextTick()
+  if (shouldAutoRecord) {
+    focusHotkeyInput()
+  }
+}
+
+function closeHotkeyDialog() {
+  hotkeyDialogVisible.value = false
+  hotkeyDialogJob.value = null
+  hotkeyDialogValue.value = ""
+  cron.resumeHotkeys()
+}
+
+function clearHotkeyDialogValue() {
+  hotkeyDialogValue.value = ""
+}
+
+function onHotkeyInputClick() {
+  if (!hotkeyDialogValueTrimmed.value) {
+    return
+  }
+  hotkeyDialogValue.value = ""
+  nextTick(() => {
+    focusHotkeyInput()
+  })
+}
+
+function normalizeHotkeyKey(key) {
+  const k = String(key || "")
+  if (!k) return ""
+  if (k === " ") return "Space"
+  const map = {
+    Escape: "Esc",
+    Enter: "Enter",
+    Tab: "Tab",
+    Backspace: "Backspace",
+    Delete: "Del",
+    Insert: "Ins",
+    Home: "Home",
+    End: "End",
+    PageUp: "PgUp",
+    PageDown: "PgDn",
+    ArrowUp: "Up",
+    ArrowDown: "Down",
+    ArrowLeft: "Left",
+    ArrowRight: "Right",
+  }
+  if (map[k]) return map[k]
+  if (/^F\d{1,2}$/i.test(k)) return k.toUpperCase()
+  if (k.length === 1) return k.toUpperCase()
+  return ""
+}
+
+function normalizeHotkeyEventKey(e) {
+  const code = String(e?.code || "")
+  if (code === "Space") return "Space"
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3)
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5)
+  if (/^Numpad[0-9]$/.test(code)) return code.slice(6)
+  return normalizeHotkeyKey(e?.key)
+}
+
+function onHotkeyKeyDown(e) {
+  if (!e) return
+  e.preventDefault()
+  e.stopPropagation()
+
+  const key = String(e.key || "")
+  if (key === "Control" || key === "Shift" || key === "Alt" || key === "Meta") {
+    return
+  }
+
+  const mods = []
+  if (e.ctrlKey) mods.push("Ctrl")
+  if (e.altKey) mods.push("Alt")
+  if (e.shiftKey) mods.push("Shift")
+  if (e.metaKey) mods.push("Win")
+
+  if (!mods.length) {
+    return
+  }
+
+  const k = normalizeHotkeyEventKey(e)
+  if (!k) {
+    return
+  }
+
+  hotkeyDialogValue.value = [...mods, k].join("+")
+}
+
+async function saveHotkey() {
+  const job = hotkeyDialogJob.value
+  if (!job) return
+  const raw = String(hotkeyDialogValue.value || "")
+  const normalized = raw ? await cron.validateJobHotkey(raw) : ""
+  await cron.setJobHotkey(job.id, normalized)
+  closeHotkeyDialog()
 }
 
 function onContextDelete() {
@@ -675,6 +1074,8 @@ async function onContextDeleteFolder() {
         <div
           v-if="item.type === 'folder'"
           :class="folderCardClass"
+          data-wincron-keep-selection="1"
+          :data-selected="isFolderSelected(item.name)"
           @dragover.prevent
           @drop.prevent.stop="onDropToFolderCardBlank($event, item.name)"
           @contextmenu.prevent.stop="openFolderContextMenu($event, item.name)"
@@ -685,7 +1086,7 @@ async function onContextDeleteFolder() {
             draggable="true"
             @dragstart="onFolderDragStart($event, item.name)"
             @dragend="clearDragState"
-            @click="toggleFolder(item.name)"
+            @click="onFolderClick($event, item.name)"
             @dragover.prevent.stop
             @drop.prevent.stop="onDropToFolder($event, item.name)"
           >
@@ -700,44 +1101,18 @@ async function onContextDeleteFolder() {
             <JobCardItem
               v-for="job in item.jobs"
               :key="job.id"
-              :job="job"
-              :selected="selectedJobId === job.id"
-              :in-folder="true"
-              :btn="btn"
-              :btn-primary="btnPrimary"
-              :btn-danger="btnDanger"
-              :format-next-run="formatJobNextRun"
-              @dragstart="onDragStart"
-              @dragend="clearDragState"
-              @drop="onDropToJob"
-              @select="cron.selectJob"
-              @edit="editJob"
-              @toggle="cron.toggleJob"
-              @run="cron.runNow"
-              @delete="cron.deleteJob"
-              @contextmenu="openContextMenu"
+              data-wincron-keep-selection="1"
+              v-bind="jobCardProps(job, true)"
+              v-on="jobCardListeners"
             />
           </div>
         </div>
 
         <JobCardItem
           v-else
-          :job="item.job"
-          :selected="selectedJobId === item.job.id"
-          :in-folder="false"
-          :btn="btn"
-          :btn-primary="btnPrimary"
-          :btn-danger="btnDanger"
-          :format-next-run="formatJobNextRun"
-          @dragstart="onDragStart"
-          @dragend="clearDragState"
-          @drop="onDropToJob"
-          @select="cron.selectJob"
-          @edit="editJob"
-          @toggle="cron.toggleJob"
-          @run="cron.runNow"
-          @delete="cron.deleteJob"
-          @contextmenu="openContextMenu"
+          data-wincron-keep-selection="1"
+          v-bind="jobCardProps(item.job, false)"
+          v-on="jobCardListeners"
         />
       </template>
 
@@ -783,13 +1158,27 @@ async function onContextDeleteFolder() {
     </ModalShell>
 
     <teleport to="body">
-      <div v-if="contextVisible" class="fixed inset-0 z-40" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu" />
+      <div v-if="contextVisible" data-wincron-keep-selection="1" class="fixed inset-0 z-40" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu" />
       <div
         v-if="contextVisible"
+        data-wincron-keep-selection="1"
         class="fixed z-50 w-[220px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.18)]"
         :style="{ left: contextX + 'px', top: contextY + 'px' }"
       >
-        <template v-if="contextKind === 'folder'">
+        <template v-if="isBulkContext">
+          <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-green-800 hover:bg-green-50" @click="onContextEnableSelected">
+            <span>{{ $t("main.folders.enable_all") }}</span>
+          </button>
+          <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50" @click="onContextDisableSelected">
+            <span>{{ $t("main.folders.disable_all") }}</span>
+          </button>
+          <div class="h-px bg-slate-200/70" />
+          <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-rose-700 hover:bg-rose-50" @click="onContextDeleteSelected">
+            <span>{{ $t("common.delete") }}</span>
+          </button>
+        </template>
+
+        <template v-else-if="contextKind === 'folder'">
           <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-slate-50" @click="onContextRenameFolder">
             <span>{{ $t("main.folders.rename") }}</span>
           </button>
@@ -815,6 +1204,10 @@ async function onContextDeleteFolder() {
           <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-slate-50" @click="onContextCopy">
             <span>{{ $t("common.copy") }}</span>
           </button>
+          <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-slate-50" @click="onContextBindHotkey">
+            <span>{{ $t("main.context.bind_hotkey") }}</span>
+            <span v-if="contextJob?.hotkey" class="text-slate-500">{{ contextJob.hotkey }}</span>
+          </button>
           <div class="h-px bg-slate-200/70" />
           <button class="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-rose-700 hover:bg-rose-50" @click="onContextDelete">
             <span>{{ $t("common.delete") }}</span>
@@ -822,5 +1215,66 @@ async function onContextDeleteFolder() {
         </template>
       </div>
     </teleport>
+
+    <ModalShell v-model="hotkeyDialogVisible" :max-width="520" @close="closeHotkeyDialog">
+      <div>
+        <h3>{{ $t("main.context.bind_hotkey") }}</h3>
+      </div>
+
+      <div class="mt-3 hotkey-input-wrap" :data-waiting="isHotkeyWaiting">
+        <label class="text-xs text-slate-500">{{ hotkeyDialogJob?.name || hotkeyDialogJob?.command || hotkeyDialogJob?.id }}</label>
+        <div class="relative mt-2">
+          <input
+            ref="hotkeyInputRef"
+            v-model="hotkeyDialogValue"
+            class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400 hotkey-record-input"
+            type="text"
+            :placeholder="$t('main.placeholders.hotkey')"
+            readonly
+            @click="onHotkeyInputClick"
+            @keydown="onHotkeyKeyDown"
+          />
+          <span class="hotkey-wait-dots pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400" aria-hidden="true" />
+        </div>
+      </div>
+
+      <div class="mt-4 flex justify-end gap-2">
+        <button :class="btn" type="button" @click="clearHotkeyDialogValue">{{ $t("common.clear") }}</button>
+        <button :class="btn" type="button" @click="closeHotkeyDialog">{{ $t("common.cancel") }}</button>
+        <button :class="btnPrimary" type="button" @click="saveHotkey">{{ $t("common.save") }}</button>
+      </div>
+    </ModalShell>
   </aside>
 </template>
+
+<style scoped>
+.hotkey-wait-dots {
+  display: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.hotkey-wait-dots::after {
+  content: "......";
+  display: inline-block;
+  overflow: hidden;
+  width: 1ch;
+  animation: hotkey-wait-dots 2000ms steps(6, end) infinite;
+}
+
+.hotkey-input-wrap[data-waiting="true"] .hotkey-wait-dots {
+  display: inline-block;
+}
+
+.hotkey-input-wrap[data-waiting="true"] .hotkey-record-input::placeholder {
+  color: transparent;
+}
+
+@keyframes hotkey-wait-dots {
+  from {
+    width: 1ch;
+  }
+  to {
+    width: 6ch;
+  }
+}
+</style>

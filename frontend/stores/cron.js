@@ -1,6 +1,6 @@
 import { reactive, ref, watch } from "vue"
 import { defineStore } from "pinia"
-import { Call, Dialogs, Events } from "@wailsio/runtime"
+import { Call, Clipboard, Dialogs, Events } from "@wailsio/runtime"
 import i18n from "../i18n.js"
 
 export const useCronStore = defineStore("cron", () => {
@@ -12,18 +12,19 @@ export const useCronStore = defineStore("cron", () => {
 
   const editorPulse = ref(null)
 
-  const closeBehavior = ref("tray")
-
   const silentStart = ref(false)
   const lightweightMode = ref(false)
   const autoStart = ref(false)
+  const runInTray = ref(true)
 
   const globalEnabled = ref(true)
 
   const jobs = ref([])
+  const jobsLoaded = ref(false)
   const selectedJobId = ref("")
+  const logFocusJobId = ref("")
   const logs = ref([])
-  const editorVisible = ref(true)
+  const editorVisible = ref(false)
 
   const form = reactive({
     id: "",
@@ -158,6 +159,20 @@ export const useCronStore = defineStore("cron", () => {
     }
   }
 
+  const normalizeMaxConsecutiveFailures = (value, fallback = 3) => {
+    if (value === "") {
+      return fallback
+    }
+    const n = Number(value)
+    if (!Number.isFinite(n)) {
+      return fallback
+    }
+    if (n < 0) {
+      return 0
+    }
+    return Math.trunc(n)
+  }
+
   async function copyJob(job) {
     error.value = ""
     try {
@@ -180,11 +195,12 @@ export const useCronStore = defineStore("cron", () => {
         command: job?.command ?? "",
         args,
         workDir: job?.workDir ?? "",
+        hotkey: "",
         flagProcessCreation: String(job?.flagProcessCreation ?? ""),
         timeout: Number(job?.timeout) || 0,
         concurrencyPolicy: job?.concurrencyPolicy ? String(job.concurrencyPolicy) : "skip",
         enabled: !!job?.enabled,
-        maxConsecutiveFailures: Number(job?.maxConsecutiveFailures) || 3,
+        maxConsecutiveFailures: normalizeMaxConsecutiveFailures(job?.maxConsecutiveFailures),
       })
 
       const saved = normalizeObjectResult(savedRaw)
@@ -194,7 +210,7 @@ export const useCronStore = defineStore("cron", () => {
 
       await refreshJobs()
       loadJobToForm(saved)
-      await loadLogs(saved.id)
+      await focusLogs(String(saved.id || ""))
       showToast(t("toast.copied_with_name", { name: saved?.name || copiedName }), "success")
     } catch (e) {
       reportError(e)
@@ -248,7 +264,9 @@ export const useCronStore = defineStore("cron", () => {
   }
 
   function normalizeSettingsResult(result) {
-    return normalize(result, { kind: "settings", keys: [], defaultValue: { closeBehavior: "tray" } })
+    const defaults = { runInTray: true, lightweightMode: true }
+    const settings = normalize(result, { kind: "settings", keys: [], defaultValue: null })
+    return settings == null ? defaults : { ...defaults, ...settings }
   }
 
   function normalizeObjectResult(result, keys = ["result", "data", "item"]) {
@@ -375,7 +393,7 @@ export const useCronStore = defineStore("cron", () => {
       timeout: Number(form.timeout) || 0,
       concurrencyPolicy: String(form.concurrencyPolicy || "skip"),
       enabled: !!form.enabled,
-      maxConsecutiveFailures: Number(form.maxConsecutiveFailures) || 3,
+      maxConsecutiveFailures: normalizeMaxConsecutiveFailures(form.maxConsecutiveFailures),
     })
 
   const setDirtyState = (value) => {
@@ -417,9 +435,10 @@ export const useCronStore = defineStore("cron", () => {
       form.timeout = Number(d.timeout) || 0
       form.concurrencyPolicy = String(d.concurrencyPolicy || "skip")
       form.enabled = !!d.enabled
-      form.maxConsecutiveFailures = Number(d.maxConsecutiveFailures) || 3
+      form.maxConsecutiveFailures = normalizeMaxConsecutiveFailures(d.maxConsecutiveFailures)
       selectedJobId.value = String(d.id || "")
-      logs.value = []
+      logFocusJobId.value = selectedJobId.value
+      loadLogs(logFocusJobId.value)
 
       if (typeof draft.baseline === "string") {
         formBaseline = draft.baseline
@@ -537,6 +556,7 @@ export const useCronStore = defineStore("cron", () => {
       const listed = normalizeArrayResult(result)
       const pending = pendingDeleteJobs.size ? new Set(pendingDeleteJobs.keys()) : null
       jobs.value = pending ? listed.filter((j) => !pending.has(String(j?.id || ""))) : listed
+      jobsLoaded.value = true
     } catch (e) {
       jobs.value = []
       reportError(e)
@@ -547,11 +567,10 @@ export const useCronStore = defineStore("cron", () => {
     try {
       const result = await callSettingsT(5000, "GetSettings")
       const settings = normalizeSettingsResult(result)
-      closeBehavior.value = settings?.closeBehavior === "exit" ? "exit" : "tray"
-
       silentStart.value = !!settings?.silentStart
-      lightweightMode.value = !!settings?.lightweightMode
+      lightweightMode.value = settings?.lightweightMode !== false
       autoStart.value = !!settings?.autoStart
+      runInTray.value = settings?.runInTray !== false
     } catch (e) {
       reportError(e)
     }
@@ -577,6 +596,52 @@ export const useCronStore = defineStore("cron", () => {
     }
   }
 
+  async function validateJobHotkey(hotkey) {
+    const hk = typeof hotkey === "string" ? hotkey : ""
+    const result = await callCronT(5000, "ValidateJobHotkey", hk)
+    return typeof result === "string" ? result : String(result ?? "")
+  }
+
+  async function setJobHotkey(jobId, hotkey) {
+    error.value = ""
+    try {
+      const id = typeof jobId === "string" ? jobId : ""
+      if (!id) {
+        return
+      }
+      const hk = typeof hotkey === "string" ? hotkey : ""
+      const updatedRaw = await callCronT(5000, "SetJobHotkey", id, hk)
+      const updated = normalizeObjectResult(updatedRaw)
+      if (!updated?.id) {
+        throw new Error(t("errors.failed_to_update_job"))
+      }
+      await refreshJobs()
+      if (selectedJobId.value === updated.id && !isFormDirty()) {
+        loadJobToForm(updated)
+      }
+    } catch (e) {
+      error.value = String(e)
+      showToast(error.value, "danger")
+      throw e
+    }
+  }
+
+  async function pauseHotkeys() {
+    try {
+      await callCronT(5000, "PauseHotkeys")
+    } catch (e) {
+      reportError(e)
+    }
+  }
+
+  async function resumeHotkeys() {
+    try {
+      await callCronT(5000, "ResumeHotkeys")
+    } catch (e) {
+      reportError(e)
+    }
+  }
+
   async function previewNextRun(cronExpr) {
     const expr = typeof cronExpr === "string" ? cronExpr : ""
     const result = await callCronT(3000, "PreviewNextRun", expr)
@@ -588,11 +653,6 @@ export const useCronStore = defineStore("cron", () => {
       return typeof candidate === "string" ? candidate : ""
     }
     return ""
-  }
-
-  async function setCloseBehavior(behavior) {
-    const normalized = behavior === "exit" ? "exit" : "tray"
-    await updateSetting("SetCloseBehavior", normalized, (v) => (closeBehavior.value = v))
   }
 
   async function setSilentStart(enabled) {
@@ -611,6 +671,11 @@ export const useCronStore = defineStore("cron", () => {
   async function setAutoStart(enabled) {
     const v = !!enabled
     await updateSetting("SetAutoStart", v, (next) => (autoStart.value = next))
+  }
+
+  async function setRunInTray(enabled) {
+    const v = !!enabled
+    await updateSetting("SetRunInTray", v, (next) => (runInTray.value = next))
   }
 
   async function openDataDir() {
@@ -638,6 +703,8 @@ export const useCronStore = defineStore("cron", () => {
   function loadJobToForm(job) {
     saveDraftNow()
     selectedJobId.value = job.id
+    logFocusJobId.value = String(job.id || "")
+    loadLogs(logFocusJobId.value)
     editorVisible.value = true
     form.id = job.id
     form.name = job.name ?? ""
@@ -653,16 +720,21 @@ export const useCronStore = defineStore("cron", () => {
     form.timeout = Number.isFinite(timeout) && timeout > 0 ? timeout : 0
     form.concurrencyPolicy = job.concurrencyPolicy ? String(job.concurrencyPolicy) : "skip"
     form.enabled = !!job.enabled
-    const mcf = Number(job.maxConsecutiveFailures)
-    form.maxConsecutiveFailures = Number.isFinite(mcf) && mcf > 0 ? mcf : 3
+    form.maxConsecutiveFailures = normalizeMaxConsecutiveFailures(job.maxConsecutiveFailures)
     markFormClean()
     return true
   }
 
   function resetForm() {
+    return resetFormWithEditor(true)
+  }
+
+  function resetFormWithEditor(showEditor = true) {
     saveDraftNow()
     selectedJobId.value = ""
-    editorVisible.value = true
+    logFocusJobId.value = ""
+    loadLogs("")
+    editorVisible.value = !!showEditor
     form.id = ""
     form.name = ""
     form.folder = ""
@@ -675,7 +747,6 @@ export const useCronStore = defineStore("cron", () => {
     form.concurrencyPolicy = "skip"
     form.enabled = true
     form.maxConsecutiveFailures = 3
-    logs.value = []
     markFormClean()
     return true
   }
@@ -684,7 +755,6 @@ export const useCronStore = defineStore("cron", () => {
     if (!loadJobToForm(job)) {
       return
     }
-    await loadLogs(job.id)
   }
 
   async function selectJob(jobId) {
@@ -693,11 +763,7 @@ export const useCronStore = defineStore("cron", () => {
     saveDraftNow()
     selectedJobId.value = id
     editorVisible.value = false
-    if (!id) {
-      logs.value = []
-      return true
-    }
-    await loadLogs(id)
+    await focusLogs(id)
     return true
   }
 
@@ -705,6 +771,9 @@ export const useCronStore = defineStore("cron", () => {
     error.value = ""
     try {
       const args = Array.isArray(form.args) ? form.args.filter((s) => s !== "") : []
+
+      const existing = form.id ? (Array.isArray(jobs.value) ? jobs.value.find((j) => String(j?.id || "") === String(form.id || "")) : null) : null
+      const existingHotkey = String(existing?.hotkey || "")
 
       const savedRaw = await callCronT(5000, "UpsertJob", {
         id: form.id,
@@ -714,11 +783,12 @@ export const useCronStore = defineStore("cron", () => {
         command: form.command,
         args,
         workDir: form.workDir,
+        hotkey: existingHotkey,
         flagProcessCreation: String(form.flagProcessCreation ?? ""),
         timeout: Number(form.timeout) || 0,
         concurrencyPolicy: form.concurrencyPolicy,
         enabled: form.enabled,
-        maxConsecutiveFailures: Number(form.maxConsecutiveFailures) || 3,
+        maxConsecutiveFailures: normalizeMaxConsecutiveFailures(form.maxConsecutiveFailures),
       })
 
       const saved = normalizeObjectResult(savedRaw)
@@ -729,7 +799,7 @@ export const useCronStore = defineStore("cron", () => {
       await refreshJobs()
       clearDraft()
       loadJobToForm(saved)
-      await loadLogs(saved.id)
+      await focusLogs(String(saved.id || ""))
       dismissToast()
       triggerEditorPulse("success")
     } catch (e) {
@@ -757,8 +827,7 @@ export const useCronStore = defineStore("cron", () => {
 
       jobs.value = Array.isArray(jobs.value) ? jobs.value.filter((j) => String(j?.id || "") !== jobId) : []
       if (wasSelected) {
-        resetForm()
-        logs.value = []
+        resetFormWithEditor(false)
       }
 
       const undo = async () => {
@@ -773,7 +842,6 @@ export const useCronStore = defineStore("cron", () => {
           const restored = Array.isArray(jobs.value) ? jobs.value.find((j) => String(j?.id || "") === jobId) : null
           if (restored) {
             loadJobToForm(restored)
-            await loadLogs(jobId)
           }
         }
         showToast(t("toast.delete_undone"), "success")
@@ -858,7 +926,7 @@ export const useCronStore = defineStore("cron", () => {
       if (!entry) {
         throw new Error(t("errors.failed_to_run_job"))
       }
-      if (!selectedJobId.value || selectedJobId.value === jobId) {
+      if (!logFocusJobId.value || logFocusJobId.value === String(entry.jobId || "")) {
         logs.value = [...logs.value, entry]
       }
     } catch (e) {
@@ -885,15 +953,28 @@ export const useCronStore = defineStore("cron", () => {
       if (!entry) {
         throw new Error(t("errors.failed_to_run_preview"))
       }
-      logs.value = [...logs.value, entry]
+      if (!logFocusJobId.value || logFocusJobId.value === String(entry.jobId || "")) {
+        logs.value = [...logs.value, entry]
+      }
     } catch (e) {
       reportError(e)
     }
   }
 
+  async function focusLogs(jobId) {
+    const id = typeof jobId === "string" ? jobId : ""
+    logFocusJobId.value = id
+    await loadLogs(id)
+  }
+
+  async function reloadFocusedLogs() {
+    await loadLogs(logFocusJobId.value || "")
+  }
+
   async function loadLogs(jobId) {
     try {
-      const result = await callCronT(5000, "ListLogs", jobId, 100)
+      const id = typeof jobId === "string" ? jobId : ""
+      const result = await callCronT(5000, "ListLogs", id, 100)
       logs.value = normalizeArrayResult(result)
     } catch (e) {
       logs.value = []
@@ -903,25 +984,79 @@ export const useCronStore = defineStore("cron", () => {
 
   async function clearLogs() {
     error.value = ""
-    showToast(t("toast.clearing"), "info")
     try {
       await callCronT(5000, "ClearLogs")
       logs.value = []
-      showToast(t("toast.cleared"), "success")
     } catch (e) {
       reportError(e)
     }
   }
 
-  async function resetAll() {
+  async function clearJobLogs(jobId) {
     error.value = ""
-    showToast(t("toast.clearing"), "info")
     try {
-      await callCronT(5000, "ResetAll")
-      clearDraft()
-      resetForm()
-      logs.value = []
-      await refreshJobs()
+      const id = typeof jobId === "string" ? jobId : ""
+      if (!id) {
+        return
+      }
+      await callCronT(5000, "ClearJobLogs", id)
+      if (logFocusJobId.value === id) {
+        await reloadFocusedLogs()
+      }
+    } catch (e) {
+      reportError(e)
+    }
+  }
+
+  async function copyLastOutput(jobId) {
+    error.value = ""
+    try {
+      const id = typeof jobId === "string" ? jobId : ""
+      if (!id) {
+        return
+      }
+      const result = await callCronT(5000, "ListLogs", id, 1)
+      const list = normalizeArrayResult(result)
+      const entry = Array.isArray(list) && list.length ? list[0] : null
+      const stdout = String(entry?.stdout || "")
+      const stderr = String(entry?.stderr || "")
+      const text = stdout || stderr
+      if (!text) {
+        return
+      }
+      await Clipboard.SetText(text)
+      showToast(t("toast.copied"), "success")
+    } catch (e) {
+      reportError(e)
+    }
+  }
+
+  async function copyLogOutput(entry) {
+    error.value = ""
+    try {
+      const stdout = String(entry?.stdout || "")
+      const stderr = String(entry?.stderr || "")
+      const text = stdout || stderr
+      if (!text) {
+        return
+      }
+      await Clipboard.SetText(text)
+      showToast(t("toast.copied"), "success")
+    } catch (e) {
+      reportError(e)
+    }
+  }
+
+  async function deleteLogEntry(entryId) {
+    error.value = ""
+    try {
+      const id = typeof entryId === "string" ? entryId : ""
+      if (!id) {
+        return
+      }
+      showToast(t("toast.clearing"), "info")
+      await callCronT(5000, "DeleteLogEntry", id)
+      logs.value = (Array.isArray(logs.value) ? logs.value : []).filter((l) => String(l?.id || "") !== id)
       showToast(t("toast.cleared"), "success")
     } catch (e) {
       reportError(e)
@@ -972,11 +1107,11 @@ export const useCronStore = defineStore("cron", () => {
       const strategy = conflictStrategy === "overwrite" ? "overwrite" : "coexist"
       await callConfigT(5000, "ImportYAML", text, strategy)
       clearDraft()
-      resetForm()
-      logs.value = []
+      resetFormWithEditor(false)
       await refreshJobs()
       await loadGlobalEnabled()
       await loadSettings()
+      await focusLogs("")
       showToast(t("toast.imported"), "success")
     } catch (e) {
       reportError(e, { rethrow: true })
@@ -993,6 +1128,8 @@ export const useCronStore = defineStore("cron", () => {
     await loadGlobalEnabled()
 
     await refreshJobs()
+
+    await focusLogs("")
 
     offJobExecuted = Events.On("jobExecuted", async (event) => {
       const entry = event?.data
@@ -1014,9 +1151,7 @@ export const useCronStore = defineStore("cron", () => {
         }
       }
 
-      if (selectedJobId.value && entry.jobId === selectedJobId.value) {
-        await loadLogs(selectedJobId.value)
-      }
+      await reloadFocusedLogs()
     })
 
     promptDraftRecovery()
@@ -1048,13 +1183,15 @@ export const useCronStore = defineStore("cron", () => {
     toastKind,
     toastActionLabel,
     editorPulse,
-    closeBehavior,
     silentStart,
     lightweightMode,
     autoStart,
+    runInTray,
     globalEnabled,
     jobs,
+    jobsLoaded,
     selectedJobId,
+    focusLogs,
     logs,
     editorVisible,
     form,
@@ -1078,17 +1215,24 @@ export const useCronStore = defineStore("cron", () => {
     runPreviewFromForm,
     loadLogs,
     clearLogs,
-    resetAll,
+    clearJobLogs,
+    copyLastOutput,
+    copyLogOutput,
+    deleteLogEntry,
     exportConfig,
     checkImportConflicts,
     importConfig,
     loadSettings,
     loadGlobalEnabled,
-    setCloseBehavior,
     setSilentStart,
     setLightweightMode,
     setAutoStart,
+    setRunInTray,
     setGlobalEnabled,
+    validateJobHotkey,
+    setJobHotkey,
+    pauseHotkeys,
+    resumeHotkeys,
     previewNextRun,
     openDataDir,
     openEnvironmentVariables,

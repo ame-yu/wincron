@@ -30,12 +30,28 @@ func handleControlCommand(args []string, consoleEnabled bool) (handled bool, exi
 
 	cmd := strings.ToLower(strings.TrimSpace(args[0]))
 	switch cmd {
-	case "disable", "enable", "status", "quit", "open":
+	case "disable", "enable", "status", "quit", "open", "run":
 	default:
 		return false, 0
 	}
 
-	resp, err := sendIPCRequest(ipcRequest{Cmd: cmd})
+	target := ""
+	switch cmd {
+	case "enable", "disable":
+		if len(args) > 1 {
+			target = strings.Join(args[1:], " ")
+		}
+	case "run":
+		if len(args) < 2 {
+			if consoleEnabled {
+				fmt.Fprintln(os.Stderr, "usage: wincron run <job name>")
+			}
+			return true, 1
+		}
+		target = strings.Join(args[1:], " ")
+	}
+
+	resp, err := sendIPCRequest(ipcRequest{Cmd: cmd, Target: target})
 	if err != nil {
 		if consoleEnabled {
 			if isLikelyPipeNotRunning(err) {
@@ -86,7 +102,7 @@ func main() {
 	if len(filteredArgs) > 0 {
 		cmd := strings.ToLower(strings.TrimSpace(filteredArgs[0]))
 		switch cmd {
-		case "disable", "enable", "status", "quit", "open":
+		case "disable", "enable", "status", "quit", "open", "run":
 			consoleEnabled = true
 		}
 	}
@@ -99,53 +115,41 @@ func main() {
 		os.Exit(exitCode)
 	}
 
-	isServiceCmd := len(filteredArgs) > 0 && filteredArgs[0] == "service"
-	isServiceRun := isServiceCmd && len(filteredArgs) > 1 && filteredArgs[1] == "run"
-	if !isServiceCmd || isServiceRun {
-		release, alreadyRunning, err := acquireSingleInstanceLock()
-		if err != nil {
-			log.Fatal(err)
-		}
-		if alreadyRunning {
-			if len(filteredArgs) == 0 {
-				deadline := time.Now().Add(1500 * time.Millisecond)
-				for {
-					resp, err := sendIPCRequest(ipcRequest{Cmd: "open"})
-					if err == nil {
-						if !resp.Ok && consoleEnabled {
-							msg := strings.TrimSpace(resp.Error)
-							if msg == "" {
-								msg = strings.TrimSpace(resp.Message)
-							}
-							if msg != "" {
-								fmt.Fprintln(os.Stderr, msg)
-							}
-						}
-						break
-					}
-					if time.Now().After(deadline) {
-						if consoleEnabled {
-							fmt.Println("wincron is already running")
-						}
-						break
-					}
-					time.Sleep(100 * time.Millisecond)
-				}
-			} else if consoleEnabled {
-				fmt.Println("wincron is already running")
-			}
-			return
-		}
-		defer release()
+	release, alreadyRunning, err := acquireSingleInstanceLock()
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	handled, err := handleServiceCommand(filteredArgs)
-	if handled {
-		if err != nil {
-			log.Fatal(err)
+	if alreadyRunning {
+		if len(filteredArgs) == 0 {
+			deadline := time.Now().Add(1500 * time.Millisecond)
+			for {
+				resp, err := sendIPCRequest(ipcRequest{Cmd: "open"})
+				if err == nil {
+					if !resp.Ok && consoleEnabled {
+						msg := strings.TrimSpace(resp.Error)
+						if msg == "" {
+							msg = strings.TrimSpace(resp.Message)
+						}
+						if msg != "" {
+							fmt.Fprintln(os.Stderr, msg)
+						}
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					if consoleEnabled {
+						fmt.Println("wincron is already running")
+					}
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		} else if consoleEnabled {
+			fmt.Println("wincron is already running")
 		}
 		return
 	}
+	defer release()
 
 	// Create a new Wails application by providing the necessary options.
 	// Variables 'Name' and 'Description' are for application metadata.
@@ -156,6 +160,12 @@ func main() {
 	configSvc := NewConfigService(cronSvc, settingsSvc)
 	executedCh := make(chan JobLogEntry, 16)
 	var quitting atomic.Bool
+
+	currentBootTime := GetSystemBootTime()
+	if settingsSvc.getAutoStart() && settingsSvc.IsSystemRebooted() {
+		go cronSvc.RunStartupJobs()
+		_ = settingsSvc.SetLastSystemBootTime(currentBootTime)
+	}
 
 	app := application.New(application.Options{
 		Name:        "wincron",
@@ -177,6 +187,7 @@ func main() {
 	})
 
 	app.OnShutdown(func() {
+		cronSvc.stopHotkeys()
 		cronSvc.scheduler.Stop()
 	})
 
@@ -225,7 +236,7 @@ func main() {
 				return
 			}
 
-			// Internal close for enabling lightweight mode should not be affected by closeBehavior.
+			// Internal close for enabling lightweight mode should not be affected by runInTray.
 			if lightweightClosing.Load() {
 				mainWindowMu.Lock()
 				if mainWindow == w {
@@ -235,13 +246,13 @@ func main() {
 				return
 			}
 
-			if settingsSvc.getCloseBehavior() == CloseBehaviorExit {
+			if !settingsSvc.getRunInTray() {
 				quitting.Store(true)
 				app.Quit()
 				return
 			}
 
-			// CloseBehaviorTray: either hide window, or destroy webview when lightweight mode is enabled.
+			// RunInTray: either hide window, or destroy webview when lightweight mode is enabled.
 			if settingsSvc.getLightweightMode() {
 				mainWindowMu.Lock()
 				if mainWindow == w {
@@ -268,25 +279,110 @@ func main() {
 	}
 
 	ipcStop, ipcErr := startIPCServer(wincronControlPipeUserPath(), false, func(req ipcRequest) ipcResponse {
+		target := strings.TrimSpace(req.Target)
+
+		matchJobsByNameOrFolder := func(t string) ([]Job, error) {
+			jobs, err := cronSvc.ListJobs()
+			if err != nil {
+				return nil, err
+			}
+			matched := make([]Job, 0)
+			for _, j := range jobs {
+				if strings.EqualFold(strings.TrimSpace(j.Name), t) || strings.EqualFold(strings.TrimSpace(j.Folder), t) {
+					matched = append(matched, j)
+				}
+			}
+			return matched, nil
+		}
+
+		matchJobsByName := func(t string) ([]Job, error) {
+			jobs, err := cronSvc.ListJobs()
+			if err != nil {
+				return nil, err
+			}
+			matched := make([]Job, 0)
+			for _, j := range jobs {
+				if strings.EqualFold(strings.TrimSpace(j.Name), t) {
+					matched = append(matched, j)
+				}
+			}
+			return matched, nil
+		}
+
+		setEnabledByTarget := func(t string, enabled bool) ipcResponse {
+			matched, err := matchJobsByNameOrFolder(t)
+			if err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			if len(matched) == 0 {
+				return ipcResponse{Ok: false, Error: fmt.Sprintf("no matching jobs: %s", t)}
+			}
+			success := 0
+			failed := 0
+			for _, j := range matched {
+				if _, err := cronSvc.SetJobEnabled(j.ID, enabled); err != nil {
+					failed++
+					continue
+				}
+				success++
+			}
+			if success == 0 {
+				return ipcResponse{Ok: false, Error: "failed to update matched jobs"}
+			}
+			verb := "disabled"
+			if enabled {
+				verb = "enabled"
+			}
+			msg := fmt.Sprintf("%s %d job(s)", verb, success)
+			if failed > 0 {
+				msg = fmt.Sprintf("%s, %d failed", msg, failed)
+			}
+			return ipcResponse{Ok: true, Message: msg}
+		}
+
 		switch req.Cmd {
 		case "disable":
-			if err := cronSvc.SetGlobalEnabled(false); err != nil {
-				return ipcResponse{Ok: false, Error: err.Error()}
+			if target == "" {
+				if err := cronSvc.SetGlobalEnabled(false); err != nil {
+					return ipcResponse{Ok: false, Error: err.Error()}
+				}
+				app.Event.Emit("globalEnabledChanged", false)
+				return ipcResponse{Ok: true, Message: "\u5df2\u7981\u7528 WinCron", GlobalEnabled: boolPtr(false)}
 			}
-			app.Event.Emit("globalEnabledChanged", false)
-			return ipcResponse{Ok: true, Message: "\u5df2\u7981\u7528 WinCron", GlobalEnabled: boolPtr(false)}
+			return setEnabledByTarget(target, false)
 		case "enable":
-			if err := cronSvc.SetGlobalEnabled(true); err != nil {
-				return ipcResponse{Ok: false, Error: err.Error()}
+			if target == "" {
+				if err := cronSvc.SetGlobalEnabled(true); err != nil {
+					return ipcResponse{Ok: false, Error: err.Error()}
+				}
+				app.Event.Emit("globalEnabledChanged", true)
+				return ipcResponse{Ok: true, Message: "\u5df2\u542f\u7528 WinCron", GlobalEnabled: boolPtr(true)}
 			}
-			app.Event.Emit("globalEnabledChanged", true)
-			return ipcResponse{Ok: true, Message: "\u5df2\u542f\u7528 WinCron", GlobalEnabled: boolPtr(true)}
+			return setEnabledByTarget(target, true)
 		case "status":
 			v, err := cronSvc.GetGlobalEnabled()
 			if err != nil {
 				return ipcResponse{Ok: false, Error: err.Error()}
 			}
 			return ipcResponse{Ok: true, GlobalEnabled: boolPtr(v)}
+		case "run":
+			if target == "" {
+				return ipcResponse{Ok: false, Error: "job name is required"}
+			}
+			matched, err := matchJobsByName(target)
+			if err != nil {
+				return ipcResponse{Ok: false, Error: err.Error()}
+			}
+			if len(matched) == 0 {
+				return ipcResponse{Ok: false, Error: fmt.Sprintf("no matching jobs: %s", target)}
+			}
+			for _, j := range matched {
+				id := j.ID
+				go func() {
+					_, _ = cronSvc.RunNow(id)
+				}()
+			}
+			return ipcResponse{Ok: true, Message: fmt.Sprintf("started %d job(s)", len(matched))}
 		case "open":
 			w := ensureMainWindow()
 			w.Show()

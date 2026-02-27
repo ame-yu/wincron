@@ -6,13 +6,15 @@ A lightweight task scheduler for Windows. I hope it is more intuitive than the b
 
 ## Features
 
-- Lightweight: single executable; low overhead when idle
+- Lightweight design: single executable; low overhead when idle
 - Schedule tasks using cron expressions
 - Supports command arguments and working directory
-- View execution logs
-- Advanced job options: concurrency policy / process mode / disable after consecutive failures
-- Tray friendly: silent start / run on boot / lightweight mode
+- Execution logs
+- Advanced job options: concurrency policy / disable after consecutive failures
+- Silent start / run on boot / lightweight mode / tray mode
+- Global hotkeys
 - Import/export
+- IPC command-line control
 
 ## Screenshots
 
@@ -40,6 +42,6 @@ A lightweight task scheduler for Windows. I hope it is more intuitive than the b
 ## Development Environment
 
 - Go: `1.25`
-- Wails: `v3.0.0-alpha.60`
+- Wails: `v3.0.0-alpha.71`
 - Bun: `v1.0` or above
 - Node.js: optional (if you don't use Bun)

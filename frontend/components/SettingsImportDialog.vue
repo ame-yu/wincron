@@ -105,7 +105,7 @@ async function confirmImport() {
       <div v-if="hasConflicts" class="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
         <div class="text-xs font-semibold text-slate-700">{{ $t("settings.conflicts", { count: importConflicts.length }) }}</div>
         <AppScrollbar root-class="mt-2 h-[180px]" view-class="flex flex-col">
-          <div v-for="name in importConflicts" :key="name" class="font-mono text-xs text-slate-700">{{ name }}</div>
+          <div v-for="name in importConflicts" :key="name" class="text-xs text-slate-700">{{ name }}</div>
         </AppScrollbar>
       </div>
       <div v-else class="mt-3 text-xs text-slate-500">{{ $t("settings.no_conflicts") }}</div>

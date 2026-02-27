@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { storeToRefs } from "pinia"
 import { useCronStore } from "../stores/cron.js"
+import { formatDateTime } from "../ui/datetime.js"
 import ArgsEditor from "./ArgsEditor.vue"
 
 const props = defineProps({
@@ -71,15 +72,7 @@ const commandPreview = computed(() => {
 })
 
 const cronNextRunDisplay = computed(() => {
-  const raw = cronNextRun.value
-  if (!raw) {
-    return ""
-  }
-  const ms = Date.parse(raw)
-  if (!Number.isFinite(ms)) {
-    return raw
-  }
-  return new Date(ms).toLocaleString()
+  return formatDateTime(cronNextRun.value)
 })
 
 watch(
@@ -147,7 +140,7 @@ watch(
 </script>
 
 <template>
-  <section v-if="editorVisible" class="relative rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.08)]" :class="pulseClass">
+  <section v-if="editorVisible" data-wincron-keep-selection="1" class="relative rounded-2xl border border-slate-200 bg-white shadow-[0_10px_30px_rgba(2,6,23,0.08)]" :class="pulseClass">
     <div class="flex items-start justify-between gap-3 px-3 pt-3 pb-2">
       <div>
         <h2>{{ $t("main.editor.title") }}</h2>
@@ -196,7 +189,7 @@ watch(
 
       <label v-if="commandPreview" class="text-xs text-slate-500 md:pt-2.5">{{ $t("main.fields.preview") }}</label>
       <div v-if="commandPreview" class="flex flex-col items-stretch gap-2 sm:flex-row">
-        <pre class="m-0 flex-1 whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-2.5 font-mono text-xs text-slate-900">{{ commandPreview }}</pre>
+        <pre class="m-0 flex-1 whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-2.5 text-xs text-slate-900">{{ commandPreview }}</pre>
         <button
           class="w-full appearance-none rounded-xl border border-blue-600/35 bg-blue-600 px-2.5 py-2 text-xs leading-none text-white transition hover:bg-blue-700 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50 sm:w-auto"
           type="button"
@@ -302,7 +295,7 @@ watch(
           <input
             v-model.number="form.maxConsecutiveFailures"
             type="number"
-            min="1"
+            min="0"
             class="w-full max-w-[220px] rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
             :placeholder="$t('main.placeholders.max_failures')"
           />

@@ -15,8 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const wincronControlPipeServicePath = `\\.\pipe\wincron_control_service`
-
 func wincronControlPipeUserPath() string {
 	sid, err := currentProcessUserSID()
 	if err != nil || sid == "" {
@@ -150,16 +148,7 @@ func sendIPCRequestToPipe(pipePath string, req ipcRequest) (ipcResponse, error) 
 }
 
 func sendIPCRequest(req ipcRequest) (ipcResponse, error) {
-	paths := []string{wincronControlPipeUserPath(), wincronControlPipeServicePath}
-	var lastErr error
-	for _, p := range paths {
-		resp, err := sendIPCRequestToPipe(p, req)
-		if err == nil {
-			return resp, nil
-		}
-		lastErr = err
-	}
-	return ipcResponse{}, lastErr
+	return sendIPCRequestToPipe(wincronControlPipeUserPath(), req)
 }
 
 func isLikelyPipeNotRunning(err error) bool {
