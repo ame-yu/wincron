@@ -2,15 +2,14 @@ package main
 
 import (
 	"embed"
-	_ "embed"
 	"fmt"
-	"io/fs"
-	"log"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"wincron/internal/ipc"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -23,142 +22,35 @@ func boolPtr(v bool) *bool {
 	return &v
 }
 
-func handleControlCommand(args []string, consoleEnabled bool) (handled bool, exitCode int) {
-	if len(args) == 0 {
-		return false, 0
-	}
-
-	cmd := strings.ToLower(strings.TrimSpace(args[0]))
-	switch cmd {
-	case "disable", "enable", "status", "quit", "open", "run":
-	default:
-		return false, 0
-	}
-
-	target := ""
-	switch cmd {
-	case "enable", "disable":
-		if len(args) > 1 {
-			target = strings.Join(args[1:], " ")
-		}
-	case "run":
-		if len(args) < 2 {
-			if consoleEnabled {
-				fmt.Fprintln(os.Stderr, "usage: wincron run <job name>")
-			}
-			return true, 1
-		}
-		target = strings.Join(args[1:], " ")
-	}
-
-	resp, err := sendIPCRequest(ipcRequest{Cmd: cmd, Target: target})
-	if err != nil {
-		if consoleEnabled {
-			if isLikelyPipeNotRunning(err) {
-				fmt.Fprintln(os.Stderr, "wincron is not running")
-			} else {
-				fmt.Fprintln(os.Stderr, err.Error())
-			}
-		}
-		return true, 2
-	}
-	if !resp.Ok {
-		if consoleEnabled {
-			msg := strings.TrimSpace(resp.Error)
-			if msg == "" {
-				msg = strings.TrimSpace(resp.Message)
-			}
-			if msg == "" {
-				msg = "request failed"
-			}
-			fmt.Fprintln(os.Stderr, msg)
-		}
-		return true, 1
-	}
-
-	if consoleEnabled {
-		if cmd == "status" {
-			if resp.GlobalEnabled != nil {
-				if *resp.GlobalEnabled {
-					fmt.Println("enabled")
-				} else {
-					fmt.Println("disabled")
-				}
-			} else if strings.TrimSpace(resp.Message) != "" {
-				fmt.Println(resp.Message)
-			}
-		} else if strings.TrimSpace(resp.Message) != "" {
-			fmt.Println(resp.Message)
-		}
-	}
-
-	return true, 0
-}
-
 func main() {
 	args := os.Args[1:]
-	filteredArgs := args
-	consoleEnabled := false
-	if len(filteredArgs) > 0 {
-		cmd := strings.ToLower(strings.TrimSpace(filteredArgs[0]))
-		switch cmd {
-		case "disable", "enable", "status", "quit", "open", "run":
-			consoleEnabled = true
-		}
-	}
-	if consoleEnabled {
-		enableConsole()
-	}
-
-	handled, exitCode := handleControlCommand(filteredArgs, consoleEnabled)
-	if handled {
-		os.Exit(exitCode)
-	}
 
 	release, alreadyRunning, err := acquireSingleInstanceLock()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	if alreadyRunning {
-		if len(filteredArgs) == 0 {
+		if len(args) == 0 {
 			deadline := time.Now().Add(1500 * time.Millisecond)
 			for {
-				resp, err := sendIPCRequest(ipcRequest{Cmd: "open"})
+				_, err := ipc.SendRequest(ipc.Request{Cmd: "open"})
 				if err == nil {
-					if !resp.Ok && consoleEnabled {
-						msg := strings.TrimSpace(resp.Error)
-						if msg == "" {
-							msg = strings.TrimSpace(resp.Message)
-						}
-						if msg != "" {
-							fmt.Fprintln(os.Stderr, msg)
-						}
-					}
 					break
 				}
 				if time.Now().After(deadline) {
-					if consoleEnabled {
-						fmt.Println("wincron is already running")
-					}
 					break
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
-		} else if consoleEnabled {
-			fmt.Println("wincron is already running")
 		}
 		return
 	}
 	defer release()
 
-	// Create a new Wails application by providing the necessary options.
-	// Variables 'Name' and 'Description' are for application metadata.
-	// 'Assets' configures the asset server with the 'FS' variable pointing to the frontend files.
-	// 'Bind' is a list of Go struct instances. The frontend has access to the methods of these instances.
 	cronSvc := NewCronService()
 	settingsSvc := NewSettingsService()
 	configSvc := NewConfigService(cronSvc, settingsSvc)
-	executedCh := make(chan JobLogEntry, 16)
 	var quitting atomic.Bool
 
 	currentBootTime := GetSystemBootTime()
@@ -168,8 +60,8 @@ func main() {
 	}
 
 	app := application.New(application.Options{
-		Name:        "wincron",
-		Description: "A demo of using raw HTML & CSS",
+		Name:        "WinCron",
+		Description: "A cron job scheduler for Windows",
 		Windows: application.WindowsOptions{
 			DisableQuitOnLastWindowClosed: true,
 		},
@@ -199,12 +91,16 @@ func main() {
 	// 'Title' is the title of the window.
 	// 'BackgroundColour' is the background colour of the window.
 	// 'URL' is the URL that will be loaded into the webview.
-	createMainWindow := func() *application.WebviewWindow {
+	createMainWindow := func(target string) *application.WebviewWindow {
+		url := "/"
+		if target == "Settings" {
+			url = "/#/settings"
+		}
 		windowW, windowH := settingsSvc.getWindowSize()
 		windowOptions := application.WebviewWindowOptions{
-			Title: "Window 1",
+			Title:            "WinCron",
 			BackgroundColour: application.NewRGB(246, 247, 251),
-			URL:              "/",
+			URL:              url,
 		}
 		if windowW > 0 && windowH > 0 {
 			windowOptions.Width = windowW
@@ -269,16 +165,23 @@ func main() {
 		return w
 	}
 
-	ensureMainWindow := func() *application.WebviewWindow {
+	showMainWindow := func(target string) {
 		mainWindowMu.Lock()
-		defer mainWindowMu.Unlock()
+		created := false
 		if mainWindow == nil {
-			mainWindow = createMainWindow()
+			mainWindow = createMainWindow(target)
+			created = true
 		}
-		return mainWindow
+		w := mainWindow
+		mainWindowMu.Unlock()
+		w.Show()
+		w.Focus()
+		if !created {
+			app.Event.Emit("navigate", target)
+		}
 	}
 
-	ipcStop, ipcErr := startIPCServer(wincronControlPipeUserPath(), false, func(req ipcRequest) ipcResponse {
+	ipcStop, ipcErr := ipc.StartServer(ipc.ControlPipeUserPath(), false, func(req ipc.Request) ipc.Response {
 		target := strings.TrimSpace(req.Target)
 
 		matchJobsByNameOrFolder := func(t string) ([]Job, error) {
@@ -309,13 +212,13 @@ func main() {
 			return matched, nil
 		}
 
-		setEnabledByTarget := func(t string, enabled bool) ipcResponse {
+		setEnabledByTarget := func(t string, enabled bool) ipc.Response {
 			matched, err := matchJobsByNameOrFolder(t)
 			if err != nil {
-				return ipcResponse{Ok: false, Error: err.Error()}
+				return ipc.Response{Ok: false, Error: err.Error()}
 			}
 			if len(matched) == 0 {
-				return ipcResponse{Ok: false, Error: fmt.Sprintf("no matching jobs: %s", t)}
+				return ipc.Response{Ok: false, Error: fmt.Sprintf("no matching jobs: %s", t)}
 			}
 			success := 0
 			failed := 0
@@ -327,7 +230,7 @@ func main() {
 				success++
 			}
 			if success == 0 {
-				return ipcResponse{Ok: false, Error: "failed to update matched jobs"}
+				return ipc.Response{Ok: false, Error: "failed to update matched jobs"}
 			}
 			verb := "disabled"
 			if enabled {
@@ -337,64 +240,69 @@ func main() {
 			if failed > 0 {
 				msg = fmt.Sprintf("%s, %d failed", msg, failed)
 			}
-			return ipcResponse{Ok: true, Message: msg}
+			return ipc.Response{Ok: true, Message: msg}
 		}
 
 		switch req.Cmd {
 		case "disable":
 			if target == "" {
 				if err := cronSvc.SetGlobalEnabled(false); err != nil {
-					return ipcResponse{Ok: false, Error: err.Error()}
+					return ipc.Response{Ok: false, Error: err.Error()}
 				}
 				app.Event.Emit("globalEnabledChanged", false)
-				return ipcResponse{Ok: true, Message: "\u5df2\u7981\u7528 WinCron", GlobalEnabled: boolPtr(false)}
+				return ipc.Response{Ok: true, Message: "WinCron disabled", GlobalEnabled: boolPtr(false)}
 			}
 			return setEnabledByTarget(target, false)
 		case "enable":
 			if target == "" {
 				if err := cronSvc.SetGlobalEnabled(true); err != nil {
-					return ipcResponse{Ok: false, Error: err.Error()}
+					return ipc.Response{Ok: false, Error: err.Error()}
 				}
 				app.Event.Emit("globalEnabledChanged", true)
-				return ipcResponse{Ok: true, Message: "\u5df2\u542f\u7528 WinCron", GlobalEnabled: boolPtr(true)}
+				return ipc.Response{Ok: true, Message: "WinCron enabled", GlobalEnabled: boolPtr(true)}
 			}
 			return setEnabledByTarget(target, true)
 		case "status":
 			v, err := cronSvc.GetGlobalEnabled()
 			if err != nil {
-				return ipcResponse{Ok: false, Error: err.Error()}
+				return ipc.Response{Ok: false, Error: err.Error()}
 			}
-			return ipcResponse{Ok: true, GlobalEnabled: boolPtr(v)}
+			return ipc.Response{Ok: true, GlobalEnabled: boolPtr(v)}
 		case "run":
 			if target == "" {
-				return ipcResponse{Ok: false, Error: "job name is required"}
+				return ipc.Response{Ok: false, Error: "job name is required"}
 			}
 			matched, err := matchJobsByName(target)
 			if err != nil {
-				return ipcResponse{Ok: false, Error: err.Error()}
+				return ipc.Response{Ok: false, Error: err.Error()}
 			}
 			if len(matched) == 0 {
-				return ipcResponse{Ok: false, Error: fmt.Sprintf("no matching jobs: %s", target)}
+				return ipc.Response{Ok: false, Error: fmt.Sprintf("no matching jobs: %s", target)}
 			}
 			for _, j := range matched {
 				id := j.ID
 				go func() {
-					_, _ = cronSvc.RunNow(id)
+					_, _ = cronSvc.runNow(id, logTriggerSourceIPC)
 				}()
 			}
-			return ipcResponse{Ok: true, Message: fmt.Sprintf("started %d job(s)", len(matched))}
+			return ipc.Response{Ok: true, Message: fmt.Sprintf("started %d job(s)", len(matched))}
+		case "import":
+			if strings.TrimSpace(req.Payload) == "" {
+				return ipc.Response{Ok: false, Error: "import payload is required"}
+			}
+			if err := configSvc.ImportYAML(req.Payload, req.ConflictStrategy); err != nil {
+				return ipc.Response{Ok: false, Error: err.Error()}
+			}
+			return ipc.Response{Ok: true, Message: "imported"}
 		case "open":
-			w := ensureMainWindow()
-			w.Show()
-			w.Focus()
-			app.Event.Emit("navigate", "main")
-			return ipcResponse{Ok: true, Message: "ok"}
+			showMainWindow("Home")
+			return ipc.Response{Ok: true, Message: "ok"}
 		case "quit":
 			quitting.Store(true)
 			app.Quit()
-			return ipcResponse{Ok: true, Message: "ok"}
+			return ipc.Response{Ok: true, Message: "ok"}
 		default:
-			return ipcResponse{Ok: false, Error: "unknown command"}
+			return ipc.Response{Ok: false, Error: "unknown command"}
 		}
 	})
 	if ipcErr == nil {
@@ -417,123 +325,29 @@ func main() {
 	}
 
 	if !settingsSvc.getSilentStart() {
-		mainWindow = createMainWindow()
+		mainWindow = createMainWindow("Home")
 	}
 
-	trayIcon, _ := fs.ReadFile(assets, "build/windows/icon.ico")
-	tray := app.SystemTray.New()
-	tray.SetLabel("WinCron")
-	tray.SetTooltip("WinCron")
-	if len(trayIcon) > 0 {
-		tray.SetIcon(trayIcon)
+	trayController := newTrayController(app, cronSvc, settingsSvc, showMainWindow, closeMainWindowForLightweight, func() {
+		quitting.Store(true)
+		app.Quit()
+	})
+	emitJobEvent := func(name string) func(JobLogEntry) {
+		return func(entry JobLogEntry) {
+			app.Event.Emit(name, entry)
+		}
 	}
+	cronSvc.setOnJobsChanged(trayController.UpdateTooltip)
 
-	var setTrayMenu func()
-	setTrayMenu = func() {
-		globalEnabled, err := cronSvc.GetGlobalEnabled()
-		if err != nil {
-			globalEnabled = true
-		}
+	cronSvc.setOnStarted(emitJobEvent("jobStarted"))
+	cronSvc.setOnExecuted(emitJobEvent("jobExecuted"))
 
-		lightweightMode := settingsSvc.getLightweightMode()
-
-		trayMenu := application.NewMenu()
-		trayMenu.Add("Open Home Page").OnClick(func(_ *application.Context) {
-			w := ensureMainWindow()
-			w.Show()
-			w.Focus()
-			app.Event.Emit("navigate", "main")
-		})
-
-		trayMenu.AddCheckbox("Lightweight Mode", lightweightMode).OnClick(func(_ *application.Context) {
-			current := settingsSvc.getLightweightMode()
-			next := !current
-			_ = settingsSvc.SetLightweightMode(next)
-			if next {
-				closeMainWindowForLightweight()
-			}
-			setTrayMenu()
-		})
-
-		toggleLabel := "Disable Wincron"
-		if !globalEnabled {
-			toggleLabel = "Enable WinCron"
-		}
-		trayMenu.Add(toggleLabel).OnClick(func(_ *application.Context) {
-			current, err := cronSvc.GetGlobalEnabled()
-			if err != nil {
-				current = true
-			}
-			next := !current
-			_ = cronSvc.SetGlobalEnabled(next)
-			app.Event.Emit("globalEnabledChanged", next)
-			setTrayMenu()
-		})
-
-		trayMenu.Add("Settings").OnClick(func(_ *application.Context) {
-			w := ensureMainWindow()
-			w.Show()
-			w.Focus()
-			app.Event.Emit("navigate", "Settings")
-		})
-
-		trayMenu.Add("Quit").OnClick(func(_ *application.Context) {
-			quitting.Store(true)
-			app.Quit()
-		})
-
-		tray.SetMenu(trayMenu)
-	}
-	setTrayMenu()
-	tray.OnClick(func() {})
-	tray.OnRightClick(func() {
-		setTrayMenu()
-		tray.OpenMenu()
-	})
-	tray.OnDoubleClick(func() {
-		w := ensureMainWindow()
-		w.Show()
-		w.Focus()
-		app.Event.Emit("navigate", "main")
-	})
-
-	cronSvc.setOnExecuted(func(entry JobLogEntry) {
-		select {
-		case executedCh <- entry:
-		default:
-		}
-	})
-
-	go func() {
-		for entry := range executedCh {
-			app.Event.Emit("jobExecuted", entry)
-
-			status := "OK"
-			if entry.ExitCode != 0 {
-				status = fmt.Sprintf("ERR (exit=%d)", entry.ExitCode)
-			}
-
-			finishedHHMM := ""
-			if entry.FinishedAt != "" {
-				if t, err := time.Parse(time.RFC3339, entry.FinishedAt); err == nil {
-					finishedHHMM = t.Local().Format("15:04")
-				}
-			}
-			if finishedHHMM != "" {
-				tray.SetTooltip(fmt.Sprintf("WinCron\n%s: %s (%s)", entry.JobName, status, finishedHHMM))
-			} else {
-				tray.SetTooltip(fmt.Sprintf("WinCron\n%s: %s", entry.JobName, status))
-			}
-		}
-	}()
-
-	// Create a goroutine that emits an event containing the current time every second.
 	// The frontend can listen to this event and update the UI accordingly.
 	go func() {
-		for {
-			now := time.Now().Format(time.RFC1123)
-			app.Event.Emit("time", now)
-			time.Sleep(time.Second)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			app.Event.Emit("time", now.Format(time.RFC1123))
 		}
 	}()
 
@@ -542,6 +356,7 @@ func main() {
 
 	// If an error occurred while running the application, log it and exit.
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }

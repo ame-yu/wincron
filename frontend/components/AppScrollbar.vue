@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, useAttrs } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, useAttrs, watch } from "vue"
 
 defineOptions({ inheritAttrs: false })
+const emit = defineEmits(["scroll-top"])
 
 const props = defineProps({
   always: { type: Boolean, default: false },
@@ -9,6 +10,11 @@ const props = defineProps({
   rootClass: { type: String, default: "" },
   wrapClass: { type: String, default: "" },
   viewClass: { type: String, default: "" },
+  isDragging: { type: Boolean, default: false },
+  hideBars: { type: Boolean, default: false },
+  scrollBadgeText: { type: String, default: "" },
+  showScrollTopButton: { type: Boolean, default: false },
+  scrollTopButtonTitle: { type: String, default: "" },
 })
 
 const attrs = useAttrs()
@@ -31,10 +37,15 @@ const dragging = ref(false)
 let scrollHideTimer = null
 let rafId = 0
 let prevBodyUserSelect = ""
+let autoScrollRaf = 0
+let autoScrollSpeed = 0
 
 const visible = computed(() => props.always || hovering.value || scrolling.value || dragging.value)
 const hasVertical = computed(() => vThumbSize.value > 0)
 const hasHorizontal = computed(() => hThumbSize.value > 0)
+const showScrollBadge = computed(() => !!String(props.scrollBadgeText || "").trim() && scrolling.value)
+const showScrollTopButton = computed(() => props.showScrollTopButton && scrolling.value)
+const showFloating = computed(() => showScrollBadge.value || showScrollTopButton.value)
 
 function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n))
@@ -230,6 +241,57 @@ function onDocumentMouseup() {
   document.removeEventListener("mouseup", onDocumentMouseup)
 }
 
+function startAutoScroll(speed) {
+  if (autoScrollSpeed === speed) return
+  autoScrollSpeed = speed
+  if (autoScrollRaf) return
+  function step() {
+    const el = wrapRef.value
+    if (el && autoScrollSpeed) {
+      el.scrollTop += autoScrollSpeed
+      autoScrollRaf = requestAnimationFrame(step)
+    } else {
+      autoScrollRaf = 0
+    }
+  }
+  autoScrollRaf = requestAnimationFrame(step)
+}
+
+function stopAutoScroll() {
+  autoScrollSpeed = 0
+  if (autoScrollRaf) {
+    cancelAnimationFrame(autoScrollRaf)
+    autoScrollRaf = 0
+  }
+}
+
+function onDragOverAutoScroll(e) {
+  if (!props.isDragging) {
+    stopAutoScroll()
+    return
+  }
+  const el = wrapRef.value
+  if (!el) {
+    stopAutoScroll()
+    return
+  }
+  const rect = el.getBoundingClientRect()
+  const y = e.clientY
+  const edge = 50
+  const maxSpeed = 10
+  if (y < rect.top + edge && y >= rect.top) {
+    startAutoScroll(-maxSpeed * ((rect.top + edge - y) / edge))
+  } else if (y > rect.bottom - edge && y <= rect.bottom) {
+    startAutoScroll(maxSpeed * ((y - (rect.bottom - edge)) / edge))
+  } else {
+    stopAutoScroll()
+  }
+}
+
+watch(() => props.isDragging, (val) => {
+  if (!val) stopAutoScroll()
+})
+
 let wrapResizeObserver = null
 let viewResizeObserver = null
 
@@ -271,6 +333,7 @@ onBeforeUnmount(() => {
   }
   document.removeEventListener("mousemove", onDocumentMousemove)
   document.removeEventListener("mouseup", onDocumentMouseup)
+  stopAutoScroll()
 })
 
 const vThumbStyle = computed(() => {
@@ -288,6 +351,10 @@ const hThumbStyle = computed(() => {
     transform: `translateX(${hThumbMove.value}px)`,
   }
 })
+
+const onScrollTopClick = () => emit("scroll-top")
+
+defineExpose({ wrapRef })
 </script>
 
 <template>
@@ -298,18 +365,48 @@ const hThumbStyle = computed(() => {
     @mouseenter="onMouseEnter"
     @mouseleave="onMouseLeave"
   >
-    <div ref="wrapRef" class="app-scrollbar__wrap" :class="props.wrapClass" v-bind="attrs" @scroll.passive="onWrapScroll">
+    <div ref="wrapRef" class="app-scrollbar__wrap" :class="props.wrapClass" v-bind="attrs" @scroll.passive="onWrapScroll" @dragover.prevent="onDragOverAutoScroll">
       <div ref="viewRef" class="app-scrollbar__view" :class="props.viewClass">
         <slot />
       </div>
     </div>
 
-    <div v-show="hasVertical" ref="vBarRef" class="app-scrollbar__bar is-vertical" @mousedown="onTrackMousedown('vertical', $event)">
+    <div
+      v-if="!props.hideBars"
+      v-show="hasVertical"
+      ref="vBarRef"
+      class="app-scrollbar__bar is-vertical"
+      @mousedown="onTrackMousedown('vertical', $event)"
+    >
       <div class="app-scrollbar__thumb" :style="vThumbStyle" @mousedown="onThumbMousedown('vertical', $event)"></div>
     </div>
 
-    <div v-show="hasHorizontal" ref="hBarRef" class="app-scrollbar__bar is-horizontal" @mousedown="onTrackMousedown('horizontal', $event)">
+    <div
+      v-if="!props.hideBars"
+      v-show="hasHorizontal"
+      ref="hBarRef"
+      class="app-scrollbar__bar is-horizontal"
+      @mousedown="onTrackMousedown('horizontal', $event)"
+    >
       <div class="app-scrollbar__thumb" :style="hThumbStyle" @mousedown="onThumbMousedown('horizontal', $event)"></div>
+    </div>
+
+    <div v-if="showFloating" class="app-scrollbar__floating">
+      <div v-if="showScrollBadge" class="app-scrollbar__badge">{{ props.scrollBadgeText }}</div>
+      <button
+        v-if="showScrollTopButton"
+        class="app-scrollbar__action"
+        type="button"
+        :title="props.scrollTopButtonTitle || undefined"
+        :aria-label="props.scrollTopButtonTitle || undefined"
+        @click="onScrollTopClick"
+      >
+        <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <rect width="32" height="32" fill="none" />
+          <polygon points="16,14 6,24 7.4,25.4 16,16.8 24.6,25.4 26,24" fill="currentColor" />
+          <rect x="4" y="8" width="24" height="2" fill="currentColor" />
+        </svg>
+      </button>
     </div>
   </div>
 </template>
@@ -387,5 +484,56 @@ const hThumbStyle = computed(() => {
 
 .app-scrollbar__thumb:active {
   background-color: rgba(144, 147, 153, 0.7);
+}
+
+.app-scrollbar__floating {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.app-scrollbar__badge {
+  pointer-events: none;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.5);
+  padding: 6px 10px;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+}
+
+.app-scrollbar__action {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  pointer-events: auto;
+  border: 0;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.5);
+  color: #fff;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  transition: background-color 120ms ease-out, transform 120ms ease-out;
+}
+
+.app-scrollbar__action:hover {
+  background: rgba(15, 23, 42, 0.64);
+}
+
+.app-scrollbar__action:active {
+  transform: translateY(1px);
+}
+
+.app-scrollbar__action svg {
+  width: 12px;
+  height: 12px;
 }
 </style>

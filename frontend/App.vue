@@ -8,7 +8,7 @@ import { useCronStore } from "./stores/cron.js"
 import { setAppLocale } from "./i18n.js"
 
 const cron = useCronStore()
-const { toast, toastKind, toastActionLabel, globalEnabled } = storeToRefs(cron)
+const { toast, toastKind, toastActionLabel, globalEnabled, selectedJobId, logFocusJobId, editorVisible } = storeToRefs(cron)
 
 const { t, locale } = useI18n()
 
@@ -22,21 +22,29 @@ const appLocale = computed({
 const router = useRouter()
 const route = useRoute()
 const isSettings = computed(() => route.name === "Settings")
+const showSearchTrigger = computed(() => route.name === "Home")
+const isJobView = computed(() => route.name === "Home" && (!!editorVisible.value || !!selectedJobId.value || !!logFocusJobId.value))
 const nav = computed(() => {
   const _ = locale.value
-  return isSettings.value
-    ? { label: t("nav.back"), name: "Home" }
-    : { label: t("nav.settings"), name: "Settings" }
+  if (isSettings.value) {
+    return { label: t("nav.back"), action: "back-route" }
+  }
+  if (isJobView.value) {
+    return { label: t("nav.back"), action: "back-home" }
+  }
+  return { label: t("nav.settings"), action: "open-settings" }
 })
 
 watch(
-  [() => route.name, () => locale.value, () => globalEnabled.value],
-  ([name, _locale, enabled]) => {
+  [() => route.name, () => locale.value, () => globalEnabled.value, () => isJobView.value],
+  ([name, _locale, enabled, jobView]) => {
     const base = enabled ? "WinCron" : t("global.disabled_title")
     const routeName = typeof name === "string" ? name : ""
     const suffix =
       routeName === "Settings"
         ? t("route.settings")
+        : routeName === "Home" && !jobView
+          ? ""
         : routeName === "Home"
           ? t("route.home")
           : routeName
@@ -47,8 +55,24 @@ watch(
   { immediate: true },
 )
 
+function openSearchPalette() {
+  window.dispatchEvent(new CustomEvent("wincron:open-search"))
+}
+
 function goNav() {
-  router.push({ name: nav.value.name }).catch(() => {})
+  if (nav.value.action === "back-route") {
+    if (window.history.length > 1) {
+      router.back()
+      return
+    }
+    router.push({ name: "Home" }).catch(() => {})
+    return
+  }
+  if (nav.value.action === "back-home") {
+    window.dispatchEvent(new CustomEvent("wincron:clear-selection"))
+    return
+  }
+  router.push({ name: "Settings" }).catch(() => {})
 }
 
 async function toggleGlobalEnabled(value) {
@@ -62,49 +86,15 @@ async function toggleGlobalEnabled(value) {
 
 const offHandlers = []
 
-function resolveClickElement(target) {
-  if (!target) return null
-  if (target instanceof Element) return target
-  return target?.parentElement || null
-}
-
-function onDocumentClickCapture(e) {
-  const el = resolveClickElement(e?.target)
-  if (!el) return
-  if (el.closest?.('[data-wincron-keep-selection="1"]')) {
-    return
-  }
-  window.dispatchEvent(new CustomEvent("wincron:clear-selection"))
-}
-
 onMounted(async () => {
   await cron.init()
 
-  document.addEventListener("click", onDocumentClickCapture, true)
-
-  const flushDraft = () => {
-    cron.flushDraft()
-  }
-
-  const promptDraft = () => {
-    cron.promptDraftRecovery()
-  }
-
   offHandlers.push(
     Events.On("navigate", async (event) => {
-      flushDraft()
       const target = String(event?.data || "")
       await router.push({ name: target === "Settings" ? "Settings" : "Home" }).catch(() => {})
     }),
   )
-
-  ;["common:WindowClosing", "common:WindowHide", "common:WindowMinimise"].forEach((name) => {
-    offHandlers.push(Events.On(name, flushDraft))
-  })
-
-  ;["common:WindowShow", "common:WindowRestore", "common:WindowUnMinimise"].forEach((name) => {
-    offHandlers.push(Events.On(name, promptDraft))
-  })
 
   offHandlers.push(
     Events.On("globalEnabledChanged", (event) => {
@@ -114,7 +104,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  document.removeEventListener("click", onDocumentClickCapture, true)
   offHandlers.splice(0).forEach((off) => off?.())
   cron.dispose()
 })
@@ -125,7 +114,6 @@ onUnmounted(() => {
     <Transition name="toast" appear>
       <div
         v-if="toast"
-        data-wincron-keep-selection="1"
         class="fixed right-3 bottom-3 z-[9999] max-w-[380px] rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm shadow-[0_10px_30px_rgba(2,6,23,0.08)] data-[kind=success]:border-green-600/25 data-[kind=success]:bg-green-50 data-[kind=danger]:border-red-600/25 data-[kind=danger]:bg-red-50 sm:right-4 sm:bottom-4"
         :data-kind="toastKind"
       >
@@ -144,12 +132,12 @@ onUnmounted(() => {
     </Transition>
 
     <header class="sticky top-0 z-[9998] border-b border-slate-200 bg-slate-50">
-      <div class="mx-auto flex max-w-[1240px] items-center justify-between gap-3 px-3 py-2 sm:px-5 sm:py-3">
+      <div class="mx-auto flex max-w-[1240px] flex-wrap items-center justify-between gap-2 px-3 py-2 sm:gap-3 sm:py-3">
         <div class="flex items-center gap-2.5">
-          <div class="flex items-center gap-2">
-            <span class="text-xs text-slate-600">{{ $t("global.label") }}</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-xs text-slate-600 hidden sm:inline">{{ $t("global.label") }}</span>
             <div
-              class="relative inline-flex h-8 w-[240px] items-stretch rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm"
+              class="relative inline-flex h-8 w-[180px] items-stretch rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm sm:w-[240px]"
               :title="globalEnabled ? $t('global.enabled') : $t('global.disabled')"
             >
               <div
@@ -178,7 +166,26 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-        <div class="flex items-center gap-2.5">
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <button
+            v-if="showSearchTrigger"
+            type="button"
+            class="group flex h-8 w-[156px] items-center gap-2 rounded-xl border border-slate-200/80 bg-slate-50 px-2.5 text-left text-xs text-slate-500 transition hover:border-slate-200 hover:bg-white active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50 sm:w-[196px]"
+            :title="$t('main.search.title')"
+            :aria-label="$t('main.search.title')"
+            aria-haspopup="dialog"
+            @click="openSearchPalette"
+          >
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-3.5 w-3.5 shrink-0 text-slate-400 transition group-hover:text-slate-500" aria-hidden="true">
+              <circle cx="8.5" cy="8.5" r="4.75" />
+              <path d="M12 12L16.25 16.25" stroke-linecap="round" />
+            </svg>
+            <span class="min-w-0 flex-1 truncate">{{ $t("settings.shortcuts.search") }}</span>
+            <span class="hidden shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-400 sm:inline-flex">
+              <span>Ctrl+F</span>
+            </span>
+          </button>
+
           <select
             v-model="appLocale"
             class="h-8 w-auto appearance-none rounded-xl border border-slate-200 bg-white px-2 text-xs leading-none text-slate-900 transition hover:bg-slate-50 active:translate-y-px focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"

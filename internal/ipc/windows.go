@@ -1,6 +1,4 @@
-//go:build windows
-
-package main
+package ipc
 
 import (
 	"bufio"
@@ -15,7 +13,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func wincronControlPipeUserPath() string {
+func ControlPipeUserPath() string {
 	sid, err := currentProcessUserSID()
 	if err != nil || sid == "" {
 		return `\\.\pipe\wincron_control_user`
@@ -51,7 +49,7 @@ func pipeSecurityDescriptor(allowAuthenticatedUsers bool) string {
 	return fmt.Sprintf("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;%s)", sid)
 }
 
-func startIPCServer(pipePath string, allowAuthenticatedUsers bool, handler func(ipcRequest) ipcResponse) (stop func(), err error) {
+func StartServer(pipePath string, allowAuthenticatedUsers bool, handler func(Request) Response) (stop func(), err error) {
 	cfg := &winio.PipeConfig{
 		SecurityDescriptor: pipeSecurityDescriptor(allowAuthenticatedUsers),
 	}
@@ -85,9 +83,9 @@ func startIPCServer(pipePath string, allowAuthenticatedUsers bool, handler func(
 					return
 				}
 
-				var req ipcRequest
+				var req Request
 				if err := unmarshalJSONLine(line, &req); err != nil {
-					resp := ipcResponse{Ok: false, Error: "invalid request"}
+					resp := Response{Ok: false, Error: "invalid request"}
 					if b, mErr := marshalJSONLine(resp); mErr == nil {
 						_, _ = c.Write(b)
 					}
@@ -116,42 +114,41 @@ func startIPCServer(pipePath string, allowAuthenticatedUsers bool, handler func(
 	return stop, nil
 }
 
-
-func sendIPCRequestToPipe(pipePath string, req ipcRequest) (ipcResponse, error) {
+func SendRequestToPipe(pipePath string, req Request) (Response, error) {
 	timeout := 2 * time.Second
 	conn, err := winio.DialPipe(pipePath, &timeout)
 	if err != nil {
-		return ipcResponse{}, err
+		return Response{}, err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	b, err := marshalJSONLine(req)
 	if err != nil {
-		return ipcResponse{}, err
+		return Response{}, err
 	}
 	if _, err := conn.Write(b); err != nil {
-		return ipcResponse{}, err
+		return Response{}, err
 	}
 
 	r := bufio.NewReaderSize(conn, 4096)
 	line, err := r.ReadBytes('\n')
 	if err != nil {
-		return ipcResponse{}, err
+		return Response{}, err
 	}
 
-	var resp ipcResponse
+	var resp Response
 	if err := unmarshalJSONLine(line, &resp); err != nil {
-		return ipcResponse{}, err
+		return Response{}, err
 	}
 	return resp, nil
 }
 
-func sendIPCRequest(req ipcRequest) (ipcResponse, error) {
-	return sendIPCRequestToPipe(wincronControlPipeUserPath(), req)
+func SendRequest(req Request) (Response, error) {
+	return SendRequestToPipe(ControlPipeUserPath(), req)
 }
 
-func isLikelyPipeNotRunning(err error) bool {
+func IsLikelyPipeNotRunning(err error) bool {
 	if err == nil {
 		return false
 	}

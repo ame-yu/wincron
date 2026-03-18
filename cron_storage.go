@@ -40,7 +40,9 @@ type logStore struct {
 
 	initErr error
 
-	insertStmt *sql.Stmt
+	insertStmt      *sql.Stmt
+	clearJobStmt    *sql.Stmt
+	deleteEntryStmt *sql.Stmt
 }
 
 func newLogStore(path string) *logStore {
@@ -66,6 +68,7 @@ func (s *logStore) append(entry JobLogEntry) error {
 		entry.ID,
 		entry.JobID,
 		entry.JobName,
+		normalizeLogTriggerSource(entry.TriggerSource),
 		entry.CommandLine,
 		startedAtMs,
 		finishedAtMs,
@@ -77,13 +80,13 @@ func (s *logStore) append(entry JobLogEntry) error {
 	return err
 }
 
- func (s *logStore) clear() error {
+func (s *logStore) clear() error {
 	if err := s.ensureInit(); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(`DELETE FROM job_logs;`)
 	return err
- }
+}
 
 func (s *logStore) clearJob(jobID string) error {
 	if err := s.ensureInit(); err != nil {
@@ -93,7 +96,10 @@ func (s *logStore) clearJob(jobID string) error {
 	if jobID == "" {
 		return fmt.Errorf("jobID is required")
 	}
-	_, err := s.db.Exec(`DELETE FROM job_logs WHERE job_id = ?;`, jobID)
+	if s.clearJobStmt == nil {
+		return fmt.Errorf("log db not initialized")
+	}
+	_, err := s.clearJobStmt.Exec(jobID)
 	return err
 }
 
@@ -105,64 +111,77 @@ func (s *logStore) deleteEntry(entryID string) error {
 	if entryID == "" {
 		return fmt.Errorf("entryID is required")
 	}
-	_, err := s.db.Exec(`DELETE FROM job_logs WHERE id = ?;`, entryID)
+	if s.deleteEntryStmt == nil {
+		return fmt.Errorf("log db not initialized")
+	}
+	_, err := s.deleteEntryStmt.Exec(entryID)
 	return err
 }
 
 func (s *logStore) tail(jobID string, limit int) ([]JobLogEntry, error) {
+	logs, _, _, err := s.page(jobID, 0, limit)
+	return logs, err
+}
+
+func (s *logStore) page(jobID string, offset int, limit int) ([]JobLogEntry, int, bool, error) {
 	if err := s.ensureInit(); err != nil {
-		return nil, err
+		return nil, 0, false, err
+	}
+	jobID = strings.TrimSpace(jobID)
+	if offset < 0 {
+		offset = 0
 	}
 	if limit <= 0 {
 		limit = 100
 	}
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if strings.TrimSpace(jobID) == "" {
-		rows, err = s.db.Query(
-			`SELECT id, job_id, job_name, command_line, started_at, finished_at, exit_code, stdout, stderr, error
-			 FROM job_logs
-			 ORDER BY started_at DESC
-			 LIMIT ?;`,
-			limit,
-		)
-	} else {
-		rows, err = s.db.Query(
-			`SELECT id, job_id, job_name, command_line, started_at, finished_at, exit_code, stdout, stderr, error
-			 FROM job_logs
-			 WHERE job_id = ?
-			 ORDER BY started_at DESC
-			 LIMIT ?;`,
-			jobID,
-			limit,
-		)
-	}
+	totalCount, err := s.count(jobID)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
+	}
+	if totalCount == 0 || offset >= totalCount {
+		return []JobLogEntry{}, totalCount, false, nil
+	}
+
+	query := `SELECT id, job_id, job_name, trigger_source, command_line, started_at, finished_at, exit_code, stdout, stderr, error
+		FROM job_logs`
+	args := make([]any, 0, 3)
+	if jobID != "" {
+		query += `
+		WHERE job_id = ?`
+		args = append(args, jobID)
+	}
+	query += `
+		ORDER BY started_at DESC
+		LIMIT ? OFFSET ?;`
+	args = append(args, limit, offset)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, 0, false, err
 	}
 	defer rows.Close()
 
 	buf := make([]JobLogEntry, 0, limit)
 	for rows.Next() {
 		var (
-			id          string
-			jid         string
-			jobName     string
-			commandLine string
-			startedAtMs int64
-			finishedAtMs int64
-			exitCode    int
-			stdout      string
-			stderr      string
-			errText     string
+			id            string
+			jid           string
+			jobName       string
+			triggerSource string
+			commandLine   string
+			startedAtMs   int64
+			finishedAtMs  int64
+			exitCode      int
+			stdout        string
+			stderr        string
+			errText       string
 		)
 		if err := rows.Scan(
 			&id,
 			&jid,
 			&jobName,
+			&triggerSource,
 			&commandLine,
 			&startedAtMs,
 			&finishedAtMs,
@@ -171,29 +190,87 @@ func (s *logStore) tail(jobID string, limit int) ([]JobLogEntry, error) {
 			&stderr,
 			&errText,
 		); err != nil {
-			return nil, err
+			return nil, 0, false, err
 		}
 		buf = append(buf, JobLogEntry{
-			ID:          id,
-			JobID:       jid,
-			JobName:     jobName,
-			CommandLine: commandLine,
-			StartedAt:   unixMsToRFC3339(startedAtMs),
-			FinishedAt:  unixMsToRFC3339(finishedAtMs),
-			ExitCode:    exitCode,
-			Stdout:      stdout,
-			Stderr:      stderr,
-			Error:       errText,
+			ID:            id,
+			JobID:         jid,
+			JobName:       jobName,
+			TriggerSource: normalizeLogTriggerSource(triggerSource),
+			CommandLine:   commandLine,
+			StartedAt:     unixMsToRFC3339(startedAtMs),
+			FinishedAt:    unixMsToRFC3339(finishedAtMs),
+			ExitCode:      exitCode,
+			Stdout:        stdout,
+			Stderr:        stderr,
+			Error:         errText,
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
 		buf[i], buf[j] = buf[j], buf[i]
 	}
-	return buf, nil
+	hasMore := offset+len(buf) < totalCount
+	return buf, totalCount, hasMore, nil
+}
+
+func (s *logStore) count(jobID string) (int, error) {
+	if err := s.ensureInit(); err != nil {
+		return 0, err
+	}
+	jobID = strings.TrimSpace(jobID)
+
+	var (
+		count int
+		err   error
+	)
+	if jobID == "" {
+		err = s.db.QueryRow(`SELECT COUNT(1) FROM job_logs;`).Scan(&count)
+	} else {
+		err = s.db.QueryRow(`SELECT COUNT(1) FROM job_logs WHERE job_id = ?;`, jobID).Scan(&count)
+	}
+	return count, err
+}
+
+func (s *logStore) countExistingIDs(jobID string, ids []string) (int, error) {
+	if err := s.ensureInit(); err != nil {
+		return 0, err
+	}
+	jobID = strings.TrimSpace(jobID)
+
+	seen := make(map[string]struct{}, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
+	query := `SELECT COUNT(1) FROM job_logs WHERE id IN (` + placeholders + `)`
+	if jobID != "" {
+		query += ` AND job_id = ?`
+		args = append(args, jobID)
+	}
+	query += `;`
+
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *logStore) merge(otherPath string) error {
@@ -221,10 +298,19 @@ func (s *logStore) merge(otherPath string) error {
 		_, _ = tx.Exec("DETACH DATABASE other;")
 	}()
 
+	otherHasTriggerSource, err := hasSQLiteColumn(tx, "other", "job_logs", "trigger_source")
+	if err != nil {
+		return err
+	}
+	selectTriggerSource := "''"
+	if otherHasTriggerSource {
+		selectTriggerSource = "trigger_source"
+	}
+
 	_, err = tx.Exec(`INSERT OR IGNORE INTO job_logs(
-		id, job_id, job_name, command_line, started_at, finished_at, exit_code, stdout, stderr, error
+		id, job_id, job_name, trigger_source, command_line, started_at, finished_at, exit_code, stdout, stderr, error
 	) SELECT
-		id, job_id, job_name, command_line, started_at, finished_at, exit_code, stdout, stderr, error
+		id, job_id, job_name, ` + selectTriggerSource + `, command_line, started_at, finished_at, exit_code, stdout, stderr, error
 	  FROM other.job_logs;`)
 	if err != nil {
 		return err
@@ -279,6 +365,7 @@ func (s *logStore) init() error {
 		id TEXT PRIMARY KEY,
 		job_id TEXT NOT NULL,
 		job_name TEXT NOT NULL,
+		trigger_source TEXT NOT NULL DEFAULT '',
 		command_line TEXT NOT NULL,
 		started_at INTEGER NOT NULL,
 		finished_at INTEGER NOT NULL,
@@ -290,22 +377,92 @@ func (s *logStore) init() error {
 		_ = db.Close()
 		return err
 	}
+	hasTriggerSource, err := hasSQLiteColumn(db, "", "job_logs", "trigger_source")
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
+	if !hasTriggerSource {
+		if _, err := db.Exec(`ALTER TABLE job_logs ADD COLUMN trigger_source TEXT NOT NULL DEFAULT '';`); err != nil {
+			_ = db.Close()
+			return err
+		}
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_logs_job_id_started_at ON job_logs(job_id, started_at DESC);`); err != nil {
 		_ = db.Close()
 		return err
 	}
 
 	insertStmt, err := db.Prepare(`INSERT INTO job_logs(
-		id, job_id, job_name, command_line, started_at, finished_at, exit_code, stdout, stderr, error
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`)
+		id, job_id, job_name, trigger_source, command_line, started_at, finished_at, exit_code, stdout, stderr, error
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`)
 	if err != nil {
+		_ = db.Close()
+		return err
+	}
+
+	clearJobStmt, err := db.Prepare(`DELETE FROM job_logs WHERE job_id = ?;`)
+	if err != nil {
+		_ = insertStmt.Close()
+		_ = db.Close()
+		return err
+	}
+
+	deleteEntryStmt, err := db.Prepare(`DELETE FROM job_logs WHERE id = ?;`)
+	if err != nil {
+		_ = clearJobStmt.Close()
+		_ = insertStmt.Close()
 		_ = db.Close()
 		return err
 	}
 
 	s.db = db
 	s.insertStmt = insertStmt
+	s.clearJobStmt = clearJobStmt
+	s.deleteEntryStmt = deleteEntryStmt
 	return nil
+}
+
+func hasSQLiteColumn(q interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, schema string, table string, column string) (bool, error) {
+	table = strings.TrimSpace(table)
+	column = strings.TrimSpace(column)
+	if table == "" || column == "" {
+		return false, fmt.Errorf("table and column are required")
+	}
+
+	pragma := "PRAGMA table_info(" + table + ");"
+	if schema = strings.TrimSpace(schema); schema != "" {
+		pragma = "PRAGMA " + schema + ".table_info(" + table + ");"
+	}
+
+	rows, err := q.Query(pragma)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(name, column) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func parseRFC3339ToUnixMs(raw string) int64 {

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -24,24 +25,35 @@ const (
 	flagCreateNoWindow   = 0x08000000
 )
 
+const (
+	logTriggerSourceCron    = "cron"
+	logTriggerSourceUI      = "ui"
+	logTriggerSourceIPC     = "ipc"
+	logTriggerSourceHotkey  = "hotkey"
+	logTriggerSourcePreview = "preview"
+)
+
 type CronService struct {
-	mu        sync.Mutex
-	logsMu    sync.Mutex
-	jobs      map[string]Job
-	store     *jobStore
-	logs      *logStore
-	scheduler *cron.Cron
-	parser    cron.Parser
-	entries   map[string]cron.EntryID
-	running   map[string]map[string]*runningJobInstance
+	mu            sync.Mutex
+	logsMu        sync.Mutex
+	jobs          map[string]Job
+	store         *jobStore
+	logs          *logStore
+	scheduler     *cron.Cron
+	parser        cron.Parser
+	entries       map[string]cron.EntryID
+	running       map[string]map[string]*runningJobInstance
 	globalEnabled bool
-	hotkeys HotkeyManager
+	hotkeys       HotkeyManager
 	hotkeysPaused bool
-	onExecuted func(JobLogEntry)
+	onStarted     func(JobLogEntry)
+	onExecuted    func(JobLogEntry)
+	onJobsChanged func()
 }
 
 type runningJobInstance struct {
-	cmd *exec.Cmd
+	cmd   *exec.Cmd
+	entry JobLogEntry
 }
 
 func applyJobWindowsProcessOptions(cmd *exec.Cmd, job Job) {
@@ -123,6 +135,24 @@ func normalizeConcurrencyPolicy(policy string) string {
 	return "skip"
 }
 
+func normalizeLogTriggerSource(value string) string {
+	if value = strings.ToLower(strings.TrimSpace(value)); value == logTriggerSourceCron || value == logTriggerSourceUI || value == logTriggerSourceIPC || value == logTriggerSourceHotkey || value == logTriggerSourcePreview {
+		return value
+	}
+	return ""
+}
+
+func newRunningLogEntry(job Job, triggerSource string, startedAt time.Time) JobLogEntry {
+	return JobLogEntry{
+		ID:            uuid.NewString(),
+		JobID:         job.ID,
+		JobName:       job.Name,
+		TriggerSource: normalizeLogTriggerSource(triggerSource),
+		CommandLine:   renderCommandLine(job.Command, job.Args),
+		StartedAt:     startedAt.Format(time.RFC3339),
+	}
+}
+
 func isRebootCron(expr string) bool {
 	return strings.EqualFold(strings.TrimSpace(expr), "@reboot")
 }
@@ -136,18 +166,18 @@ func NewCronService() *CronService {
 	c := cron.New(cron.WithParser(parser))
 
 	s := &CronService{
-		jobs:      map[string]Job{},
-		store:     store,
-		logs:      logs,
-		scheduler: c,
-		parser:    parser,
-		entries:   map[string]cron.EntryID{},
-		running:   map[string]map[string]*runningJobInstance{},
+		jobs:          map[string]Job{},
+		store:         store,
+		logs:          logs,
+		scheduler:     c,
+		parser:        parser,
+		entries:       map[string]cron.EntryID{},
+		running:       map[string]map[string]*runningJobInstance{},
 		globalEnabled: true,
 	}
 	if runtime.GOOS == "windows" {
 		s.hotkeys = newWindowsHotkeyManager(func(jobID string) {
-			s.runHotkey(jobID)
+			s.runFromSource(jobID, logTriggerSourceHotkey)
 		})
 		s.hotkeys.Start()
 	}
@@ -168,22 +198,47 @@ func defaultDataDir() string {
 	return filepath.Join(".", "data")
 }
 
+func resolveDataDir() (string, error) {
+	dir := defaultDataDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return dir, nil
+}
+
+func resolveJobWorkDir(workDir string) (string, error) {
+	dir := strings.TrimSpace(workDir)
+	if dir != "" {
+		return dir, nil
+	}
+	return resolveDataDir()
+}
 
 func (s *CronService) ListJobs() ([]Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
+	return s.snapshotJobsLocked(time.Now(), nil), nil
+}
+
+func (s *CronService) snapshotJobsLocked(now time.Time, include func(Job) bool) []Job {
 	jobs := make([]Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		jj := j
+	for _, job := range s.jobs {
+		if include != nil && !include(job) {
+			continue
+		}
+
+		jj := job
 		jj.NextRunAt = ""
 		if jj.Enabled {
 			jj.NextRunAt = s.computeNextRunAt(jj.ID, jj, now)
 		}
 		jobs = append(jobs, jj)
 	}
-	return jobs, nil
+	return jobs
 }
 
 func (s *CronService) computeNextRunAt(jobID string, job Job, now time.Time) string {
@@ -219,13 +274,13 @@ func (s *CronService) computeNextRunAt(jobID string, job Job, now time.Time) str
 	return ""
 }
 
- func (s *CronService) GetGlobalEnabled() (bool, error) {
+func (s *CronService) GetGlobalEnabled() (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.globalEnabled, nil
- }
+}
 
- func (s *CronService) SetGlobalEnabled(enabled bool) error {
+func (s *CronService) SetGlobalEnabled(enabled bool) error {
 	s.mu.Lock()
 	manager := s.hotkeys
 	paused := s.hotkeysPaused
@@ -246,6 +301,7 @@ func (s *CronService) computeNextRunAt(jobID string, job Job, now time.Time) str
 		if manager != nil {
 			_ = manager.SetActive(false)
 		}
+		s.notifyJobsChanged()
 		return nil
 	}
 
@@ -259,8 +315,9 @@ func (s *CronService) computeNextRunAt(jobID string, job Job, now time.Time) str
 	if manager != nil {
 		_ = manager.SetActive(!paused)
 	}
+	s.notifyJobsChanged()
 	return nil
- }
+}
 
 func (s *CronService) stopHotkeys() {
 	s.mu.Lock()
@@ -304,10 +361,6 @@ func (s *CronService) syncHotkeysFromJobs() {
 		_ = manager.SetBinding(j.ID, desired)
 	}
 	_ = manager.SetActive(globalEnabled && !paused)
-}
-
-func (s *CronService) runHotkey(id string) {
-	s.runFromSource(id, "hotkey")
 }
 
 func (s *CronService) normalizeJobHotkeyLocked(jobID string, hotkey string) (string, error) {
@@ -393,20 +446,9 @@ func (s *CronService) GetJobsWithHotkeys() ([]Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
-	out := make([]Job, 0)
-	for _, j := range s.jobs {
-		if strings.TrimSpace(j.Hotkey) == "" {
-			continue
-		}
-		jj := j
-		jj.NextRunAt = ""
-		if jj.Enabled {
-			jj.NextRunAt = s.computeNextRunAt(jj.ID, jj, now)
-		}
-		out = append(out, jj)
-	}
-	return out, nil
+	return s.snapshotJobsLocked(time.Now(), func(job Job) bool {
+		return strings.TrimSpace(job.Hotkey) != ""
+	}), nil
 }
 
 func (s *CronService) PreviewNextRun(cronExpr string) (string, error) {
@@ -445,6 +487,9 @@ func (s *CronService) UpsertJob(job Job) (Job, error) {
 		job.Name = job.Command
 	}
 	job.FlagProcessCreation = normalizeProcessCreationFlag(job.FlagProcessCreation)
+	if job.InheritEnv != nil && *job.InheritEnv {
+		job.InheritEnv = nil
+	}
 
 	// Handle @reboot syntax - auto-set RunAtStartup
 	if isRebootCron(job.Cron) {
@@ -459,12 +504,12 @@ func (s *CronService) UpsertJob(job Job) (Job, error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if job.ID == "" {
 		job.ID = uuid.NewString()
 	}
 	if normalized, err := s.normalizeJobHotkeyLocked(job.ID, job.Hotkey); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	} else {
 		job.Hotkey = normalized
@@ -482,15 +527,20 @@ func (s *CronService) UpsertJob(job Job) (Job, error) {
 	}
 	job.ConcurrencyPolicy = normalizeConcurrencyPolicy(job.ConcurrencyPolicy)
 	if err := s.setHotkeyBindingLocked(job); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	}
 	s.jobs[job.ID] = job
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	}
 	if err := s.rescheduleLocked(job.ID); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	}
+	s.mu.Unlock()
+	s.notifyJobsChanged()
 	return job, nil
 }
 
@@ -518,15 +568,18 @@ func (s *CronService) DeleteJob(id string) error {
 	if manager != nil {
 		_ = manager.SetBinding(id, "")
 	}
+	if err == nil {
+		s.notifyJobsChanged()
+	}
 	return err
 }
 
 func (s *CronService) SetJobEnabled(id string, enabled bool) (Job, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	job, ok := s.jobs[id]
 	if !ok {
+		s.mu.Unlock()
 		return Job{}, errors.New("job not found")
 	}
 	job.Enabled = enabled
@@ -534,15 +587,20 @@ func (s *CronService) SetJobEnabled(id string, enabled bool) (Job, error) {
 		job.ConsecutiveFailures = 0
 	}
 	if err := s.setHotkeyBindingLocked(job); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	}
 	s.jobs[id] = job
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	}
 	if err := s.rescheduleLocked(id); err != nil {
+		s.mu.Unlock()
 		return Job{}, err
 	}
+	s.mu.Unlock()
+	s.notifyJobsChanged()
 	return job, nil
 }
 
@@ -563,27 +621,26 @@ func (s *CronService) SetJobFolder(id string, folder string) (Job, error) {
 }
 
 func (s *CronService) RunNow(id string) (JobLogEntry, error) {
+	return s.runNow(id, logTriggerSourceUI)
+}
+
+func (s *CronService) runNow(id string, triggerSource string) (JobLogEntry, error) {
 	s.mu.Lock()
 	job, ok := s.jobs[id]
 	s.mu.Unlock()
 	if !ok {
 		return JobLogEntry{}, errors.New("job not found")
 	}
-	entry, err := s.runJobWithPolicy(job, "manual")
+	entry, err := s.runJobWithPolicy(job, triggerSource)
 	if err != nil {
 		return JobLogEntry{}, err
 	}
 	if entry == nil {
 		return JobLogEntry{}, errors.New("skipped")
 	}
-	s.logsMu.Lock()
-	err = s.logs.append(*entry)
-	s.logsMu.Unlock()
-	if err != nil {
+	if err := s.finishExecution(id, *entry, true); err != nil {
 		return JobLogEntry{}, err
 	}
-	_ = s.applyExecutionResult(id, entry.ExitCode == 0, entry.FinishedAt)
-	s.notifyExecuted(*entry)
 	return *entry, nil
 }
 
@@ -603,24 +660,21 @@ func (s *CronService) RunPreview(req PreviewRunRequest) (JobLogEntry, error) {
 	}
 
 	job := Job{
-		ID:      jobID,
-		Name:    jobName,
-		Command: req.Command,
-		Args:    req.Args,
-		WorkDir: req.WorkDir,
+		ID:                  jobID,
+		Name:                jobName,
+		Command:             req.Command,
+		Args:                req.Args,
+		WorkDir:             req.WorkDir,
+		InheritEnv:          req.InheritEnv,
 		FlagProcessCreation: normalizeProcessCreationFlag(req.FlagProcessCreation),
-		Timeout: req.Timeout,
-		Enabled: true,
+		Timeout:             req.Timeout,
+		Enabled:             true,
 	}
 
-	entry := s.execute(job, "")
-	s.logsMu.Lock()
-	err := s.logs.append(entry)
-	s.logsMu.Unlock()
-	if err != nil {
+	entry := s.execute(job, "", logTriggerSourcePreview)
+	if err := s.finishExecution("", entry, false); err != nil {
 		return JobLogEntry{}, err
 	}
-	s.notifyExecuted(entry)
 	return entry, nil
 }
 
@@ -656,7 +710,92 @@ func (s *CronService) reserveExecutionLocked(jobID string, policy string) (strin
 	return instanceID, false
 }
 
-func (s *CronService) runJobWithPolicy(job Job, source string) (*JobLogEntry, error) {
+func (s *CronService) updateRunningInstance(jobID, instanceID string, update func(*runningJobInstance)) {
+	if instanceID == "" {
+		return
+	}
+	s.mu.Lock()
+	if instances := s.running[jobID]; instances != nil {
+		if inst := instances[instanceID]; inst != nil {
+			update(inst)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *CronService) runningLogEntries(jobID string) []JobLogEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var entries []JobLogEntry
+	for runningJobID, instances := range s.running {
+		if jobID != "" && runningJobID != jobID {
+			continue
+		}
+		for _, inst := range instances {
+			if inst == nil || inst.entry.ID == "" {
+				continue
+			}
+			entries = append(entries, inst.entry)
+		}
+	}
+	return entries
+}
+
+func appendUniqueLogEntries(dst []JobLogEntry, seen map[string]struct{}, entries []JobLogEntry) []JobLogEntry {
+	for _, entry := range entries {
+		if entry.ID == "" {
+			continue
+		}
+		if _, ok := seen[entry.ID]; ok {
+			continue
+		}
+		seen[entry.ID] = struct{}{}
+		dst = append(dst, entry)
+	}
+	return dst
+}
+
+func uniqueLogEntries(entries []JobLogEntry) []JobLogEntry {
+	unique := make([]JobLogEntry, 0, len(entries))
+	return appendUniqueLogEntries(unique, make(map[string]struct{}, len(entries)), entries)
+}
+
+func logEntryIDs(entries []JobLogEntry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ID == "" {
+			continue
+		}
+		ids = append(ids, entry.ID)
+	}
+	return ids
+}
+
+func (s *CronService) TerminateLogEntry(entryID string) error {
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return errors.New("log entry id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, instances := range s.running {
+		for _, inst := range instances {
+			if inst == nil || inst.entry.ID != entryID {
+				continue
+			}
+			if inst.cmd == nil || inst.cmd.Process == nil {
+				return errors.New("job process is not running")
+			}
+			return inst.cmd.Process.Kill()
+		}
+	}
+	return errors.New("running job not found")
+}
+
+func (s *CronService) runJobWithPolicy(job Job, triggerSource string) (*JobLogEntry, error) {
 	job.ConcurrencyPolicy = normalizeConcurrencyPolicy(job.ConcurrencyPolicy)
 
 	if job.ConcurrencyPolicy == "kill_old" {
@@ -673,22 +812,103 @@ func (s *CronService) runJobWithPolicy(job Job, source string) (*JobLogEntry, er
 	instanceID, alreadyRunning := s.reserveExecutionLocked(job.ID, job.ConcurrencyPolicy)
 	s.mu.Unlock()
 
+	if alreadyRunning && (triggerSource == logTriggerSourceUI || triggerSource == logTriggerSourceIPC) {
+		return nil, errors.New("job is already running")
+	}
 	if alreadyRunning {
-		if source == "manual" {
-			return nil, errors.New("job is already running")
-		}
 		return nil, nil
 	}
 
-	entry := s.execute(job, instanceID)
+	entry := s.execute(job, instanceID, triggerSource)
 	return &entry, nil
 }
 
-
 func (s *CronService) ListLogs(jobID string, limit int) ([]JobLogEntry, error) {
 	s.logsMu.Lock()
+	logs, err := s.logs.tail(jobID, limit)
+	s.logsMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	running := s.runningLogEntries(jobID)
+	if len(running) == 0 {
+		return logs, nil
+	}
+
+	combined := make([]JobLogEntry, 0, len(running)+len(logs))
+	seen := make(map[string]struct{}, len(running)+len(logs))
+	combined = appendUniqueLogEntries(combined, seen, running)
+	combined = appendUniqueLogEntries(combined, seen, logs)
+	return combined, nil
+}
+
+func (s *CronService) ListLogsPage(jobID string, offset int, limit int) (JobLogPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+
+	running := uniqueLogEntries(s.runningLogEntries(jobID))
+
+	s.logsMu.Lock()
+	logs, storedTotalCount, hasMore, err := s.logs.page(jobID, offset, limit)
+	if err != nil {
+		s.logsMu.Unlock()
+		return JobLogPage{}, err
+	}
+
+	runningInStoreCount := 0
+	if len(running) > 0 {
+		runningInStoreCount, err = s.logs.countExistingIDs(jobID, logEntryIDs(running))
+		if err != nil {
+			s.logsMu.Unlock()
+			return JobLogPage{}, err
+		}
+	}
+	s.logsMu.Unlock()
+
+	totalCount := storedTotalCount + len(running) - runningInStoreCount
+	if totalCount < 0 {
+		totalCount = 0
+	}
+
+	items := logs
+	if offset == 0 && len(running) > 0 {
+		items = make([]JobLogEntry, 0, len(running)+len(logs))
+		seen := make(map[string]struct{}, len(running)+len(logs))
+		items = appendUniqueLogEntries(items, seen, running)
+		items = appendUniqueLogEntries(items, seen, logs)
+	}
+
+	return JobLogPage{
+		Items:       items,
+		StoredCount: len(logs),
+		TotalCount:  totalCount,
+		HasMore:     hasMore,
+	}, nil
+}
+
+func (s *CronService) appendLog(entry JobLogEntry) error {
+	s.logsMu.Lock()
 	defer s.logsMu.Unlock()
-	return s.logs.tail(jobID, limit)
+	return s.logs.append(entry)
+}
+
+func (s *CronService) finishExecution(jobID string, entry JobLogEntry, updateState bool) error {
+	jobsChanged := false
+	if updateState {
+		if changed, err := s.applyExecutionResult(jobID, entry.ExitCode == 0, entry.FinishedAt); err == nil {
+			jobsChanged = changed
+		}
+	}
+	if err := s.appendLog(entry); err != nil {
+		return err
+	}
+	if jobsChanged {
+		s.notifyJobsChanged()
+	}
+	s.notifyExecuted(entry)
+	return nil
 }
 
 func (s *CronService) ClearLogs() error {
@@ -765,7 +985,7 @@ func (s *CronService) rescheduleLocked(id string) error {
 
 	jobID := job.ID
 	entryID, err := s.scheduler.AddFunc(expr, func() {
-		s.runScheduled(jobID)
+		s.runFromSource(jobID, logTriggerSourceCron)
 	})
 	if err != nil {
 		return err
@@ -795,15 +1015,11 @@ func (s *CronService) RunStartupJobs() {
 	s.mu.Unlock()
 
 	for _, job := range jobsToRun {
-		go s.runScheduled(job.ID)
+		go s.runFromSource(job.ID, logTriggerSourceCron)
 	}
 }
 
-func (s *CronService) runScheduled(id string) {
-	s.runFromSource(id, "scheduled")
-}
-
-func (s *CronService) runFromSource(id, source string) {
+func (s *CronService) runFromSource(id, triggerSource string) {
 	s.mu.Lock()
 	job, ok := s.jobs[id]
 	globalEnabled := s.globalEnabled
@@ -812,29 +1028,27 @@ func (s *CronService) runFromSource(id, source string) {
 	if !ok || !globalEnabled || !job.Enabled {
 		return
 	}
-	if source == "hotkey" && paused {
+	if triggerSource == logTriggerSourceHotkey && paused {
 		return
 	}
-	entry, err := s.runJobWithPolicy(job, source)
+	entry, err := s.runJobWithPolicy(job, triggerSource)
+	if triggerSource == logTriggerSourceCron {
+		s.notifyJobsChanged()
+	}
 	if err != nil || entry == nil {
 		return
 	}
 	entryV := *entry
-	_ = s.applyExecutionResult(id, entryV.ExitCode == 0, entryV.FinishedAt)
-	s.logsMu.Lock()
-	if err := s.logs.append(entryV); err == nil {
-		s.notifyExecuted(entryV)
-	}
-	s.logsMu.Unlock()
+	_ = s.finishExecution(id, entryV, true)
 }
 
-func (s *CronService) applyExecutionResult(id string, ok bool, executedAt string) error {
+func (s *CronService) applyExecutionResult(id string, ok bool, executedAt string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	job, exists := s.jobs[id]
 	if !exists {
-		return nil
+		return false, nil
 	}
 	prevEnabled := job.Enabled
 	job.ExecutedCount++
@@ -852,48 +1066,79 @@ func (s *CronService) applyExecutionResult(id string, ok bool, executedAt string
 
 	s.jobs[id] = job
 	if err := s.persistLocked(); err != nil {
-		return err
+		return false, err
 	}
 	if job.Enabled != prevEnabled {
-		return s.rescheduleLocked(id)
+		return true, s.rescheduleLocked(id)
 	}
-	return nil
+	return false, nil
 }
 
-func (s *CronService) setOnExecuted(f func(JobLogEntry)) {
+func (s *CronService) setJobLogCallback(slot *func(JobLogEntry), f func(JobLogEntry)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.onExecuted = f
+	*slot = f
 }
 
-func (s *CronService) notifyExecuted(entry JobLogEntry) {
+func (s *CronService) notifyJobLogCallback(slot *func(JobLogEntry), entry JobLogEntry) {
 	s.mu.Lock()
-	f := s.onExecuted
+	f := *slot
+	s.mu.Unlock()
+	if f != nil {
+		go f(entry)
+	}
+}
+
+func (s *CronService) setOnExecuted(f func(JobLogEntry)) { s.setJobLogCallback(&s.onExecuted, f) }
+
+func (s *CronService) setOnStarted(f func(JobLogEntry)) { s.setJobLogCallback(&s.onStarted, f) }
+
+func (s *CronService) setOnJobsChanged(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onJobsChanged = f
+}
+
+func (s *CronService) notifyStarted(entry JobLogEntry) { s.notifyJobLogCallback(&s.onStarted, entry) }
+
+func (s *CronService) notifyExecuted(entry JobLogEntry) { s.notifyJobLogCallback(&s.onExecuted, entry) }
+
+func (s *CronService) notifyJobsChanged() {
+	s.mu.Lock()
+	f := s.onJobsChanged
 	s.mu.Unlock()
 	if f == nil {
 		return
 	}
-	go f(entry)
+	go f()
 }
 
-func (s *CronService) execute(job Job, runningInstanceID string) JobLogEntry {
+func (s *CronService) execute(job Job, runningInstanceID string, triggerSource string) JobLogEntry {
 	start := time.Now()
+	entry := newRunningLogEntry(job, triggerSource, start)
 
 	cmd := exec.Command(job.Command, job.Args...)
-	if job.WorkDir != "" {
-		cmd.Dir = job.WorkDir
+	workDir, err := resolveJobWorkDir(job.WorkDir)
+	if err != nil {
+		end := time.Now()
+		entry.FinishedAt = end.Format(time.RFC3339)
+		entry.ExitCode = -1
+		entry.Error = err.Error()
+		return entry
+	}
+	cmd.Dir = workDir
+	inheritEnv := true
+	if job.InheritEnv != nil {
+		inheritEnv = *job.InheritEnv
+	}
+	if inheritEnv {
+		cmd.Env = os.Environ()
+	} else {
+		cmd.Env = []string{}
 	}
 	applyJobWindowsProcessOptions(cmd, job)
 
-	if runningInstanceID != "" {
-		s.mu.Lock()
-		if instances, ok := s.running[job.ID]; ok {
-			if inst, ok := instances[runningInstanceID]; ok {
-				inst.cmd = cmd
-			}
-		}
-		s.mu.Unlock()
-	}
+	s.updateRunningInstance(job.ID, runningInstanceID, func(inst *runningJobInstance) { inst.cmd = cmd })
 
 	var outBuf bytes.Buffer
 	var errBuf bytes.Buffer
@@ -903,6 +1148,8 @@ func (s *CronService) execute(job Job, runningInstanceID string) JobLogEntry {
 	runErr := cmd.Start()
 	timedOut := false
 	if runErr == nil {
+		s.updateRunningInstance(job.ID, runningInstanceID, func(inst *runningJobInstance) { inst.entry = entry })
+		s.notifyStarted(entry)
 		if job.Timeout > 0 {
 			done := make(chan error, 1)
 			go func() {
@@ -949,29 +1196,20 @@ func (s *CronService) execute(job Job, runningInstanceID string) JobLogEntry {
 		s.mu.Unlock()
 	}
 
-	stdout := truncateString(outBuf.String(), 16*1024)
-	stderr := truncateString(errBuf.String(), 16*1024)
-
-	return JobLogEntry{
-		ID:         uuid.NewString(),
-		JobID:      job.ID,
-		JobName:    job.Name,
-		CommandLine: renderCommandLine(job.Command, job.Args),
-		StartedAt:  start.Format(time.RFC3339),
-		FinishedAt: end.Format(time.RFC3339),
-		ExitCode:   exitCode,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		Error:      errText,
-	}
+	entry.FinishedAt = end.Format(time.RFC3339)
+	entry.ExitCode = exitCode
+	entry.Stdout = truncateString(outBuf.String(), 16*1024)
+	entry.Stderr = truncateString(errBuf.String(), 16*1024)
+	entry.Error = errText
+	return entry
 }
 
 func truncateString(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if len(s) <= max {
+	if utf8.RuneCountInString(s) <= max {
 		return s
 	}
-	return s[:max]
+	return string([]rune(s)[:max])
 }

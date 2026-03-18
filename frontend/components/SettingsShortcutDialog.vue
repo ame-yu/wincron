@@ -41,12 +41,14 @@ const toggleBtnClass = props.btn + " cursor-pointer data-[kind=success]:border-g
     <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
       <div class="text-sm font-semibold text-slate-900 pb-2">{{ $t("settings.shortcuts_subtitle") }}</div>
       <div class="grid grid-cols-[140px_1fr] gap-x-3 gap-y-2 text-sm px-3">
-        <div class="text-xs text-slate-700">Ctrl/⌘ + N</div>
+        <div class="text-xs text-slate-700">Ctrl + N</div>
         <div class="text-slate-900">{{ $t("settings.shortcuts.new") }}</div>
-        <div class="text-xs text-slate-700">Ctrl/⌘ + Shift + N</div>
+        <div class="text-xs text-slate-700">Ctrl + Shift + N</div>
         <div class="text-slate-900">{{ $t("settings.shortcuts.new_folder") }}</div>
-        <div class="text-xs text-slate-700">Ctrl/⌘ + S</div>
+        <div class="text-xs text-slate-700">Ctrl + S</div>
         <div class="text-slate-900">{{ $t("settings.shortcuts.save") }}</div>
+        <div class="text-xs text-slate-700">Ctrl + F</div>
+        <div class="text-slate-900">{{ $t("settings.shortcuts.search") }}</div>
       </div>
     </div>
 

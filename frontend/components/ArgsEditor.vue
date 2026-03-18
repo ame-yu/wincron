@@ -54,17 +54,17 @@ function onArgEnter(e, index) {
 
 <template>
   <div>
-    <div v-for="(a, i) in form.args" :key="i" class="mb-2 flex flex-wrap items-center gap-2">
+    <div v-for="(a, i) in form.args" :key="i" class="mb-1.5 flex flex-wrap items-center gap-1.5 sm:mb-2 sm:gap-2">
       <input
         :ref="(el) => setArgRef(el, i)"
         v-model="form.args[i]"
-        class="w-full flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50"
+        class="w-full flex-1 rounded-xl border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-4 focus:ring-blue-600/20 focus:border-blue-600/50 sm:px-2.5 sm:py-2"
         :placeholder="$t('main.placeholders.arg')"
         @keydown.enter="onArgEnter($event, i)"
         @keydown.backspace="onArgBackspace($event, i)"
       />
-      <button :class="btnIcon" type="button" @click="addArg(i)">+</button>
-      <button :class="btnIcon" type="button" @click="removeArg(i)">-</button>
+      <button :class="btnIcon + ' text-sm sm:text-base'" type="button" @click="addArg(i)">+</button>
+      <button :class="btnIcon + ' text-sm sm:text-base'" type="button" @click="removeArg(i)">-</button>
     </div>
   </div>
 </template>

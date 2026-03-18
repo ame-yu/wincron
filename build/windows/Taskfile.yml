@@ -18,10 +18,12 @@ tasks:
     cmds:
       - task: generate:syso
       - go build {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}.exe
+      - go build {{.IPCCTL_BUILD_FLAGS}} -o {{.BIN_DIR}}/wincronctl.exe ./cmd/ipcctl
       - cmd: powershell Remove-item *.syso
         platforms: [windows]
     vars:
       BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"{{else}}-buildvcs=false -gcflags=all="-l" -ldflags="-H windowsgui"{{end}}'
+      IPCCTL_BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-trimpath -buildvcs=false -ldflags="-w -s"{{else}}-buildvcs=false -gcflags=all="-l"{{end}}'
     env:
       GOOS: windows
       CGO_ENABLED: 0

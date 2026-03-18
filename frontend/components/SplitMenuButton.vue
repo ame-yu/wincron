@@ -6,6 +6,7 @@ const props = defineProps({
   primaryLabel: { type: String, required: true },
   menuItems: { type: Array, required: true },
   menuWidthClass: { type: String, default: "w-40" },
+  compact: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(["primary", "select"])
@@ -23,8 +24,16 @@ function clearCloseTimer() {
   closeTimer = null
 }
 
-const leftClass = computed(() => String(props.btnPrimary).replace(/\brounded-xl\b/g, "rounded-l-xl") + " border-r-0")
-const rightClass = computed(() => String(props.btnPrimary).replace(/\brounded-xl\b/g, "rounded-r-xl") + " px-2.5")
+const buttonBaseClass = computed(() => {
+  let className = String(props.btnPrimary)
+  if (props.compact) {
+    className = className.replace(/\bpy-2\b/g, "py-1.5")
+  }
+  return className
+})
+
+const leftClass = computed(() => buttonBaseClass.value.replace(/\brounded-xl\b/g, "rounded-l-xl") + " border-r-0")
+const rightClass = computed(() => buttonBaseClass.value.replace(/\brounded-xl\b/g, "rounded-r-xl") + " px-2.5")
 
 function openMenu() {
   clearCloseTimer()

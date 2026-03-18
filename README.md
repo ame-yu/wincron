@@ -39,6 +39,8 @@ A lightweight task scheduler for Windows. I hope it is more intuitive than the b
 
    `wails3 build`
 
+   This produces `bin/wincron.exe` and the CLI helper `bin/wincronctl.exe`.
+
 ## Development Environment
 
 - Go: `1.25`

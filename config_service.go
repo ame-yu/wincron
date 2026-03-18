@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var CONFIG_VERSION = 5
+var CONFIG_VERSION = 6
 
 type ConfigService struct {
 	cron     *CronService
@@ -23,16 +23,11 @@ func NewConfigService(cron *CronService, settings *SettingsService) *ConfigServi
 	return &ConfigService{cron: cron, settings: settings}
 }
 
-type exportedCronConfig struct {
-	GlobalEnabled bool `yaml:"globalEnabled,omitempty"`
-}
-
 type exportedConfig struct {
-	Version    int               `yaml:"version"`
-	ExportedAt string            `yaml:"exportedAt,omitempty"`
-	Settings   *AppSettings      `yaml:"settings,omitempty"`
-	Cron       *exportedCronConfig `yaml:"cron,omitempty"`
-	Jobs       *[]Job            `yaml:"jobs,omitempty"`
+	Version    int          `yaml:"version"`
+	ExportedAt string       `yaml:"exportedAt,omitempty"`
+	Settings   *AppSettings `yaml:"settings,omitempty"`
+	Jobs       *[]Job       `yaml:"jobs,omitempty"`
 }
 
 func normalizeJobName(name string, command string) string {
@@ -42,7 +37,6 @@ func normalizeJobName(name string, command string) string {
 	}
 	return n
 }
-
 
 func (s *ConfigService) ExportYAML(exportJobs bool, exportSettings bool, onlyEnabled bool) (string, error) {
 	if !exportJobs {
@@ -89,12 +83,7 @@ func (s *ConfigService) ExportYAML(exportJobs bool, exportSettings bool, onlyEna
 		if err != nil {
 			return "", err
 		}
-		globalEnabled, err := s.cron.GetGlobalEnabled()
-		if err != nil {
-			return "", err
-		}
 		cfg.Settings = &settings
-		cfg.Cron = &exportedCronConfig{GlobalEnabled: globalEnabled}
 	}
 
 	b, err := yaml.Marshal(cfg)
@@ -130,7 +119,7 @@ func (s *ConfigService) ExportYAMLToFile(filePath string, exportJobs bool, expor
 }
 
 func (s *ConfigService) CheckImportYAMLConflicts(yamlText string) ([]string, error) {
-	jobs, _, _, err := parseYAMLConfig([]byte(yamlText))
+	jobs, _, err := parseYAMLConfig([]byte(yamlText))
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +156,7 @@ func (s *ConfigService) CheckImportYAMLConflicts(yamlText string) ([]string, err
 }
 
 func (s *ConfigService) ImportYAML(yamlText string, conflictStrategy string) error {
-	jobs, settings, globalEnabled, err := parseYAMLConfig([]byte(yamlText))
+	jobs, settings, err := parseYAMLConfig([]byte(yamlText))
 	if err != nil {
 		return err
 	}
@@ -233,11 +222,6 @@ func (s *ConfigService) ImportYAML(yamlText string, conflictStrategy string) err
 			return err
 		}
 	}
-	if globalEnabled != nil {
-		if err := s.cron.SetGlobalEnabled(*globalEnabled); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -255,23 +239,19 @@ func uniqueImportName(base string, reserved map[string]struct{}) string {
 	return fmt.Sprintf("%s (imported %d)", base, time.Now().Unix())
 }
 
-func parseYAMLConfig(b []byte) (jobs []Job, settings *AppSettings, globalEnabled *bool, err error) {
+func parseYAMLConfig(b []byte) (jobs []Job, settings *AppSettings, err error) {
 	var list []Job
 	if err0 := yaml.Unmarshal(b, &list); err0 == nil {
-		return list, nil, nil, nil
+		return list, nil, nil
 	}
 
 	var cfg exportedConfig
 	if err = yaml.Unmarshal(b, &cfg); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	if cfg.Jobs != nil {
 		jobs = *cfg.Jobs
 	}
 	settings = cfg.Settings
-	if cfg.Cron != nil {
-		ge := cfg.Cron.GlobalEnabled
-		globalEnabled = &ge
-	}
-	return jobs, settings, globalEnabled, nil
+	return jobs, settings, nil
 }

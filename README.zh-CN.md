@@ -37,6 +37,8 @@
 
    `wails3 build`
 
+   会生成 `bin/wincron.exe` 和命令行工具 `bin/wincronctl.exe`。
+
 ## 开发环境
 
 - Go：`1.25`

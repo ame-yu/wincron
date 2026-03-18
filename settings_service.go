@@ -17,13 +17,10 @@ import (
 )
 
 type AppSettings struct {
-	WindowWidth   int    `json:"windowWidth,omitempty" yaml:"windowWidth,omitempty"`
-	WindowHeight  int    `json:"windowHeight,omitempty" yaml:"windowHeight,omitempty"`
 	LightweightMode bool `json:"lightweightMode,omitempty" yaml:"lightweightMode,omitempty"`
-	SilentStart    bool `json:"silentStart,omitempty" yaml:"silentStart,omitempty"`
-	AutoStart      bool `json:"autoStart,omitempty" yaml:"autoStart,omitempty"`
-	RunInTray      bool `json:"runInTray" yaml:"runInTray"`
-	LastSystemBootTime string `json:"lastSystemBootTime,omitempty" yaml:"lastSystemBootTime,omitempty"`
+	SilentStart     bool `json:"silentStart,omitempty" yaml:"silentStart,omitempty"`
+	AutoStart       bool `json:"autoStart,omitempty" yaml:"autoStart,omitempty"`
+	RunInTray       bool `json:"runInTray" yaml:"runInTray"`
 }
 
 func defaultAppSettings() AppSettings {
@@ -31,6 +28,34 @@ func defaultAppSettings() AppSettings {
 		RunInTray:       true,
 		LightweightMode: true,
 	}
+}
+
+type LocalSettings struct {
+	WindowWidth        int    `json:"windowWidth,omitempty"`
+	WindowHeight       int    `json:"windowHeight,omitempty"`
+	LastSystemBootTime string `json:"lastSystemBootTime,omitempty"`
+}
+
+type settingsStoreData struct {
+	AppSettings
+	Local LocalSettings `json:"local"`
+}
+
+func defaultSettingsStoreData() settingsStoreData {
+	return settingsStoreData{
+		AppSettings: defaultAppSettings(),
+	}
+}
+
+func normalizeWindowSize(width int, height int) (int, int) {
+	if width < 200 || height < 200 {
+		return 0, 0
+	}
+	return width, height
+}
+
+func (d *settingsStoreData) normalize() {
+	d.Local.WindowWidth, d.Local.WindowHeight = normalizeWindowSize(d.Local.WindowWidth, d.Local.WindowHeight)
 }
 
 type settingsStore struct {
@@ -41,57 +66,79 @@ func newSettingsStore(path string) *settingsStore {
 	return &settingsStore{path: path}
 }
 
-func (s *settingsStore) load() (AppSettings, error) {
-	settings := defaultAppSettings()
-	if err := readJSONOrDefault(s.path, &settings, func() {}); err != nil {
-		return AppSettings{}, err
+func (s *settingsStore) load() (settingsStoreData, error) {
+	data := defaultSettingsStoreData()
+	if err := readJSONOrDefault(s.path, &data, func() {
+		data = defaultSettingsStoreData()
+	}); err != nil {
+		return settingsStoreData{}, err
 	}
-	if settings.WindowWidth < 200 || settings.WindowHeight < 200 {
-		settings.WindowWidth = 0
-		settings.WindowHeight = 0
-	}
-	return settings, nil
+	data.normalize()
+	return data, nil
 }
 
-func (s *settingsStore) save(settings AppSettings) error {
-	return writeJSONAtomic(s.path, settings)
+func (s *settingsStore) save(data settingsStoreData) error {
+	return writeJSONAtomic(s.path, data)
 }
 
 type SettingsService struct {
-	mu       sync.RWMutex
-	store    *settingsStore
-	settings AppSettings
+	mu    sync.RWMutex
+	store *settingsStore
+	data  settingsStoreData
 }
 
 func NewSettingsService() *SettingsService {
 	baseDir := defaultDataDir()
 	store := newSettingsStore(filepath.Join(baseDir, "settings.json"))
-	settings, err := store.load()
+	data, err := store.load()
 	if err != nil {
-		settings = defaultAppSettings()
+		data = defaultSettingsStoreData()
 	}
-	return &SettingsService{store: store, settings: settings}
+	return &SettingsService{store: store, data: data}
 }
 
 func (s *SettingsService) GetSettings() (AppSettings, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.settings, nil
+	return s.data.AppSettings, nil
 }
 
 // updateAndPersist applies a modification to settings and persists to disk.
 // On save failure, the modification is rolled back.
-func (s *SettingsService) updateAndPersist(modify func(*AppSettings)) error {
+func (s *SettingsService) updateAndPersist(modify func(*settingsStoreData)) error {
 	s.mu.Lock()
-	prev := s.settings
-	modify(&s.settings)
-	settings := s.settings
+	prev := s.data
+	modify(&s.data)
+	s.data.normalize()
+	data := s.data
 	s.mu.Unlock()
 
-	if err := s.store.save(settings); err != nil {
+	if err := s.store.save(data); err != nil {
 		s.mu.Lock()
-		s.settings = prev
+		s.data = prev
 		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// updateAutoStartSetting keeps AutoStart side effects and persistence in sync.
+// On save failure, the startup shortcut is rolled back to the previous state.
+func (s *SettingsService) updateAutoStartSetting(nextAutoStart bool, modify func(*settingsStoreData)) error {
+	s.mu.RLock()
+	prevAutoStart := s.data.AppSettings.AutoStart
+	s.mu.RUnlock()
+
+	if prevAutoStart != nextAutoStart {
+		if err := s.applyAutoStart(nextAutoStart); err != nil {
+			return err
+		}
+	}
+
+	if err := s.updateAndPersist(modify); err != nil {
+		if prevAutoStart != nextAutoStart {
+			_ = s.applyAutoStart(prevAutoStart)
+		}
 		return err
 	}
 	return nil
@@ -166,124 +213,74 @@ func (s *SettingsService) applyAutoStart(enabled bool) error {
 }
 
 func (s *SettingsService) SetSettings(settings AppSettings) error {
-	if settings.WindowWidth < 200 || settings.WindowHeight < 200 {
-		settings.WindowWidth = 0
-		settings.WindowHeight = 0
-	}
-
-	s.mu.RLock()
-	prev := s.settings
-	s.mu.RUnlock()
-
-	if prev.AutoStart != settings.AutoStart {
-		if err := s.applyAutoStart(settings.AutoStart); err != nil {
-			return err
-		}
-	}
-
-	s.mu.Lock()
-	s.settings = settings
-	s.mu.Unlock()
-
-	if err := s.store.save(settings); err != nil {
-		s.mu.Lock()
-		s.settings = prev
-		s.mu.Unlock()
-		if prev.AutoStart != settings.AutoStart {
-			_ = s.applyAutoStart(prev.AutoStart)
-		}
-		return err
-	}
-	return nil
- }
+	return s.updateAutoStartSetting(settings.AutoStart, func(data *settingsStoreData) {
+		data.AppSettings = settings
+	})
+}
 
 func (s *SettingsService) SetSilentStart(enabled bool) error {
-	return s.updateAndPersist(func(st *AppSettings) { st.SilentStart = enabled })
+	return s.updateAndPersist(func(data *settingsStoreData) { data.AppSettings.SilentStart = enabled })
 }
 
 func (s *SettingsService) SetAutoStart(enabled bool) error {
-	s.mu.RLock()
-	prevSettings := s.settings
-	s.mu.RUnlock()
-
-	if err := s.applyAutoStart(enabled); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	prev := s.settings.AutoStart
-	s.settings.AutoStart = enabled
-	settings := s.settings
-	s.mu.Unlock()
-
-	if err := s.store.save(settings); err != nil {
-		s.mu.Lock()
-		s.settings.AutoStart = prev
-		s.mu.Unlock()
-		_ = s.applyAutoStart(prevSettings.AutoStart)
-		return err
-	}
-	return nil
+	return s.updateAutoStartSetting(enabled, func(data *settingsStoreData) {
+		data.AppSettings.AutoStart = enabled
+	})
 }
 
 func (s *SettingsService) SetLightweightMode(enabled bool) error {
-	return s.updateAndPersist(func(st *AppSettings) { st.LightweightMode = enabled })
+	return s.updateAndPersist(func(data *settingsStoreData) { data.AppSettings.LightweightMode = enabled })
 }
 
 func (s *SettingsService) SetRunInTray(enabled bool) error {
-	return s.updateAndPersist(func(st *AppSettings) { st.RunInTray = enabled })
+	return s.updateAndPersist(func(data *settingsStoreData) { data.AppSettings.RunInTray = enabled })
 }
 
 func (s *SettingsService) getRunInTray() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.settings.RunInTray
+	return s.data.AppSettings.RunInTray
 }
 
 func (s *SettingsService) getLightweightMode() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.settings.LightweightMode
+	return s.data.AppSettings.LightweightMode
 }
 
 func (s *SettingsService) getSilentStart() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.settings.SilentStart
+	return s.data.AppSettings.SilentStart
 }
 
 func (s *SettingsService) getAutoStart() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.settings.AutoStart
+	return s.data.AppSettings.AutoStart
 }
 
 func (s *SettingsService) getWindowSize() (width int, height int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.settings.WindowWidth < 200 || s.settings.WindowHeight < 200 {
-		return 0, 0
-	}
-	return s.settings.WindowWidth, s.settings.WindowHeight
+	return s.data.Local.WindowWidth, s.data.Local.WindowHeight
 }
 
 func (s *SettingsService) setWindowSize(width int, height int) error {
-	if width < 200 || height < 200 {
+	width, height = normalizeWindowSize(width, height)
+	if width == 0 || height == 0 {
 		return nil
 	}
-	return s.updateAndPersist(func(st *AppSettings) {
-		st.WindowWidth = width
-		st.WindowHeight = height
+	return s.updateAndPersist(func(data *settingsStoreData) {
+		data.Local.WindowWidth = width
+		data.Local.WindowHeight = height
 	})
 }
 
 func (s *SettingsService) OpenDataDir() (string, error) {
-	dir := defaultDataDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir, err := resolveDataDir()
+	if err != nil {
 		return "", err
-	}
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
 	}
 
 	var cmd *exec.Cmd
@@ -325,12 +322,12 @@ func GetSystemBootTime() string {
 func (s *SettingsService) GetLastSystemBootTime() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.settings.LastSystemBootTime
+	return s.data.Local.LastSystemBootTime
 }
 
 // SetLastSystemBootTime updates the stored last system boot time
 func (s *SettingsService) SetLastSystemBootTime(bootTime string) error {
-	return s.updateAndPersist(func(st *AppSettings) { st.LastSystemBootTime = bootTime })
+	return s.updateAndPersist(func(data *settingsStoreData) { data.Local.LastSystemBootTime = bootTime })
 }
 
 // IsSystemRebooted checks if system has been rebooted since last run
